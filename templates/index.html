@@ -1,0 +1,3873 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TERMINAL // MARKET INTELLIGENCE</title>
+  <style>
+    :root {
+      --bg: #000000;
+      --bg-panel: #0d0a05;
+      --neon-blue: #ff9900;
+      /* primary amber (Bloomberg signature) */
+      --neon-cyan: #00c2ff;
+      /* links / secondary info */
+      --neon-purple: #ffb84d;
+      /* secondary amber tone */
+      --neon-green: #00e676;
+      /* gains */
+      --neon-red: #ff3b30;
+      /* losses */
+      --text-dim: #8a8168;
+      --text: #eae6da;
+      --border: rgba(255, 153, 0, 0.25);
+      --font-mono: 'Consolas', 'SFMono-Regular', 'Courier New', monospace;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      height: 100%;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-mono);
+      overflow-x: hidden;
+      min-height: 100vh;
+      position: relative;
+    }
+
+    /* ============ 背景演出 ============ */
+    #bg-canvas {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+    }
+
+    .scanlines {
+      position: fixed;
+      inset: 0;
+      z-index: 1;
+      pointer-events: none;
+      background: repeating-linear-gradient(to bottom, rgba(255, 153, 0, 0.02) 0px, rgba(255, 153, 0, 0.02) 1px,
+          transparent 2px, transparent 4px);
+      mix-blend-mode: screen;
+    }
+
+    .vignette {
+      position: fixed;
+      inset: 0;
+      z-index: 1;
+      pointer-events: none;
+      background: radial-gradient(ellipse at center, transparent 40%, rgba(0, 0, 0, 0.9) 100%);
+    }
+
+    .grid-bg {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      opacity: .2;
+      background-image:
+        linear-gradient(rgba(255, 153, 0, 0.08) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 153, 0, 0.08) 1px, transparent 1px);
+      background-size: 42px 42px;
+      animation: gridMove 18s linear infinite;
+    }
+
+    @keyframes gridMove {
+      from {
+        background-position: 0 0;
+      }
+
+      to {
+        background-position: 42px 42px;
+      }
+    }
+
+    /* ============ レイアウト ============ */
+    #app {
+      position: relative;
+      z-index: 2;
+      display: grid;
+      grid-template-rows: auto auto auto 1fr auto auto;
+      min-height: 100vh;
+    }
+
+    /* 上: タイトルバー */
+    header.titlebar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 24px;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(180deg, rgba(255, 153, 0, 0.07), transparent);
+      backdrop-filter: blur(4px);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .brand .glyph {
+      width: 30px;
+      height: 30px;
+      border: 1px solid var(--neon-blue);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--neon-blue);
+      font-weight: bold;
+      box-shadow: 0 0 12px var(--neon-blue);
+      animation: pulseGlyph 3s ease-in-out infinite;
+    }
+
+    @keyframes pulseGlyph {
+
+      0%,
+      100% {
+        box-shadow: 0 0 8px var(--neon-blue);
+      }
+
+      50% {
+        box-shadow: 0 0 20px var(--neon-blue);
+      }
+    }
+
+    .brand h1 {
+      font-size: 16px;
+      letter-spacing: 4px;
+      font-weight: 600;
+      color: var(--neon-blue);
+      text-shadow: 0 0 10px rgba(255, 153, 0, 0.6);
+    }
+
+    .brand span.sub {
+      display: block;
+      font-size: 9px;
+      letter-spacing: 3px;
+      color: var(--text-dim);
+      margin-top: 2px;
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .header-clock {
+      font-size: 12px;
+      letter-spacing: 2px;
+      color: var(--neon-cyan);
+    }
+
+    .status-chip {
+      font-size: 10px;
+      letter-spacing: 2px;
+      padding: 5px 12px;
+      border: 1px solid var(--neon-green);
+      color: var(--neon-green);
+      border-radius: 2px;
+      position: relative;
+      padding-left: 20px;
+    }
+
+    .status-chip::before {
+      content: '';
+      position: absolute;
+      left: 6px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--neon-green);
+      box-shadow: 0 0 8px var(--neon-green);
+      animation: blink 1.4s ease-in-out infinite;
+    }
+
+    @keyframes blink {
+
+      0%,
+      100% {
+        opacity: 1;
+      }
+
+      50% {
+        opacity: .2;
+      }
+    }
+
+    /* 機能キーバー（Bloomberg端末のファンクションキー風・装飾） */
+    .fnbar {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255, 153, 0, 0.04);
+      overflow-x: auto;
+    }
+
+    .fnbar .fnkey {
+      flex: 1;
+      min-width: 76px;
+      text-align: center;
+      padding: 6px 4px;
+      font-size: 9.5px;
+      letter-spacing: 1px;
+      color: var(--text-dim);
+      border-right: 1px solid rgba(255, 153, 0, 0.1);
+      white-space: nowrap;
+      cursor: default;
+      user-select: none;
+    }
+
+    .fnbar .fnkey b {
+      display: block;
+      color: var(--neon-purple);
+      font-size: 9px;
+    }
+
+    .fnbar .fnkey:hover {
+      background: rgba(255, 153, 0, 0.08);
+      color: var(--text);
+    }
+
+    /* 検索バー */
+    .search-zone {
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      background: rgba(13, 10, 5, 0.6);
+    }
+
+    .search-input-wrap {
+      flex: 1;
+      position: relative;
+      display: flex;
+      align-items: center;
+      border: 1px solid var(--border);
+      background: rgba(255, 153, 0, 0.03);
+      transition: border-color .25s, box-shadow .25s;
+    }
+
+    .search-input-wrap:focus-within {
+      border-color: var(--neon-blue);
+      box-shadow: 0 0 16px rgba(255, 153, 0, 0.35);
+    }
+
+    .search-input-wrap::before {
+      content: '>';
+      color: var(--neon-green);
+      padding: 0 10px;
+      font-weight: bold;
+    }
+
+    #queryInput {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 14px;
+      padding: 12px 4px;
+      letter-spacing: 1px;
+    }
+
+    #queryInput::placeholder {
+      color: var(--text-dim);
+    }
+
+    #searchBtn,
+    #watchBtn {
+      border: 1px solid var(--neon-purple);
+      color: var(--neon-purple);
+      background: rgba(255, 153, 0, 0.08);
+      padding: 12px 22px;
+      letter-spacing: 2px;
+      font-size: 12px;
+      font-family: var(--font-mono);
+      cursor: pointer;
+      transition: all .2s;
+      position: relative;
+      overflow: hidden;
+      white-space: nowrap;
+    }
+
+    #searchBtn:hover,
+    #watchBtn:hover {
+      background: var(--neon-purple);
+      color: #000;
+      box-shadow: 0 0 20px var(--neon-purple);
+    }
+
+    #searchBtn:active,
+    #watchBtn:active {
+      transform: scale(0.97);
+    }
+
+    #watchBtn {
+      border-color: var(--neon-cyan);
+      color: var(--neon-cyan);
+    }
+
+    #watchBtn:hover {
+      background: var(--neon-cyan);
+      color: #000;
+      box-shadow: 0 0 20px var(--neon-cyan);
+    }
+
+    #suggestBox {
+      position: absolute;
+      top: 100%;
+      left: 0;
+      width: 100%;
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-top: none;
+      max-height: 250px;
+      overflow-y: auto;
+      z-index: 100;
+      display: none;
+    }
+
+    .suggest-item {
+      padding: 10px 14px;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      border-bottom: 1px solid rgba(255, 153, 0, 0.1);
+      color: var(--text);
+      font-size: 13px;
+      transition: background 0.15s;
+    }
+
+    .suggest-item:hover,
+    .suggest-item.focused {
+      background: rgba(255, 153, 0, 0.15);
+      color: var(--neon-blue);
+    }
+
+    .suggest-item .code {
+      color: var(--neon-green);
+      font-family: var(--font-mono);
+    }
+
+    /* 保有銘柄バナー */
+    #stockBanner {
+      display: none;
+      padding: 14px 24px;
+      background: rgba(13, 10, 5, 0.85);
+      border-bottom: 1px solid var(--border);
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    #stockBanner .sb-left {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+    }
+
+    #stockBanner .sb-right {
+      display: flex;
+      align-items: baseline;
+      gap: 16px;
+    }
+
+    #stockName {
+      font-size: 18px;
+      font-weight: bold;
+      color: var(--neon-blue);
+      letter-spacing: 2px;
+    }
+
+    #stockCode {
+      font-size: 12px;
+      color: var(--text-dim);
+      letter-spacing: 1px;
+    }
+
+    #stockPrice {
+      font-size: 24px;
+      font-weight: bold;
+      color: var(--text);
+      font-family: var(--font-mono);
+    }
+
+    #stockChange,
+    #stockChangePct {
+      font-size: 14px;
+      font-weight: bold;
+      font-family: var(--font-mono);
+    }
+
+    .delay-tag {
+      font-size: 10px;
+      color: var(--neon-green);
+      letter-spacing: 1px;
+      border: 1px solid var(--neon-green);
+      padding: 2px 6px;
+      border-radius: 2px;
+    }
+
+    .sb-add-btn {
+      font-size: 10px;
+      letter-spacing: 1px;
+      color: var(--neon-cyan);
+      border: 1px solid var(--neon-cyan);
+      padding: 4px 10px;
+      cursor: pointer;
+      background: transparent;
+      font-family: var(--font-mono);
+    }
+
+    .sb-add-btn:hover {
+      background: var(--neon-cyan);
+      color: #000;
+    }
+
+    #stockDetailRow {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 18px;
+      padding: 8px 24px 12px;
+      background: rgba(13, 10, 5, 0.85);
+      border-bottom: 1px solid var(--border);
+      font-size: 10.5px;
+      letter-spacing: 0.5px;
+    }
+
+    #stockDetailRow .dt-item {
+      color: var(--text-dim);
+      display: flex;
+      gap: 6px;
+      align-items: baseline;
+    }
+
+    #stockDetailRow .dt-item b {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    #stockDetailRow .dt-item.hi b {
+      color: var(--neon-green);
+    }
+
+    #stockDetailRow .dt-item.lo b {
+      color: var(--neon-red);
+    }
+
+    /* ティック更新時のフラッシュ演出（本物の板情報のような「動いている感」を出す） */
+    @keyframes flashUp {
+      0% {
+        background: rgba(0, 230, 118, 0.35);
+      }
+
+      100% {
+        background: transparent;
+      }
+    }
+
+    @keyframes flashDown {
+      0% {
+        background: rgba(255, 59, 48, 0.35);
+      }
+
+      100% {
+        background: transparent;
+      }
+    }
+
+    .flash-up {
+      animation: flashUp .6s ease-out;
+    }
+
+    .flash-down {
+      animation: flashDown .6s ease-out;
+    }
+
+    /* チャートパネル（1分足～月足まで切り替え可能な価格チャート） */
+    #chartPanel {
+      display: none;
+      padding: 14px 24px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(10, 8, 4, 0.6);
+    }
+
+    .chart-head {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+
+    .chart-title {
+      font-size: 11px;
+      letter-spacing: 2px;
+      color: var(--neon-cyan);
+    }
+
+    .chart-intervals {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+
+    .chart-interval-btn {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 1px;
+      padding: 4px 10px;
+      background: transparent;
+      color: var(--text-dim);
+      border: 1px solid var(--border);
+      cursor: pointer;
+      transition: all .15s;
+    }
+
+    .chart-interval-btn:hover {
+      color: var(--text);
+      border-color: var(--neon-blue);
+    }
+
+    .chart-interval-btn.active {
+      color: #000;
+      background: var(--neon-blue);
+      border-color: var(--neon-blue);
+      font-weight: bold;
+    }
+
+    .chart-status {
+      font-size: 9.5px;
+      color: var(--text-dim);
+      letter-spacing: 1px;
+      margin-left: auto;
+    }
+
+    .chart-tools {
+      display: flex;
+      gap: 4px;
+      align-items: center;
+    }
+
+    .chart-tool-btn {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: bold;
+      width: 24px;
+      height: 22px;
+      line-height: 1;
+      padding: 0;
+      background: transparent;
+      color: var(--text-dim);
+      border: 1px solid var(--border);
+      cursor: pointer;
+      transition: all .15s;
+    }
+
+    .chart-tool-btn:hover {
+      color: var(--text);
+      border-color: var(--neon-blue);
+    }
+
+    .chart-hint {
+      font-size: 9px;
+      color: var(--text-dim);
+      letter-spacing: 0.5px;
+      margin-top: 4px;
+      opacity: .75;
+    }
+
+    .chart-canvas-wrap {
+      width: 100%;
+      position: relative;
+      touch-action: none;
+      user-select: none;
+      cursor: grab;
+    }
+
+    .chart-canvas-wrap.dragging {
+      cursor: grabbing;
+    }
+
+    #chartCanvas {
+      width: 100%;
+      height: 210px;
+      display: block;
+    }
+
+    #volumeCanvas {
+      width: 100%;
+      height: 70px;
+      display: block;
+      border-top: 1px dashed rgba(255, 153, 0, 0.12);
+    }
+
+    /* MARKET PULSE: 検索していなくても常時流れるグローバルヘッドライン */
+    .pulse-tape {
+      border-bottom: 1px solid var(--border);
+      background: rgba(0, 194, 255, 0.05);
+      overflow: hidden;
+      white-space: nowrap;
+      position: relative;
+      height: 26px;
+      display: flex;
+      align-items: center;
+    }
+
+    .pulse-tape .pulse-label {
+      flex-shrink: 0;
+      font-size: 9.5px;
+      letter-spacing: 2px;
+      color: #000;
+      background: var(--neon-cyan);
+      padding: 3px 10px;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      font-weight: bold;
+    }
+
+    .pulse-track {
+      display: inline-flex;
+      gap: 44px;
+      padding-left: 24px;
+      animation: pulseScroll 45s linear infinite;
+    }
+
+    .pulse-tape:hover .pulse-track {
+      animation-play-state: paused;
+    }
+
+    @keyframes pulseScroll {
+      from {
+        transform: translateX(0);
+      }
+
+      to {
+        transform: translateX(-50%);
+      }
+    }
+
+    .pulse-item {
+      font-size: 10.5px;
+      letter-spacing: 0.5px;
+      color: var(--text-dim);
+    }
+
+    .pulse-item a {
+      color: var(--text);
+      text-decoration: none;
+    }
+
+    .pulse-item a:hover {
+      color: var(--neon-cyan);
+      text-shadow: 0 0 6px var(--neon-cyan);
+    }
+
+    .pulse-item .pm {
+      color: var(--neon-cyan);
+      margin-right: 6px;
+    }
+
+    /* メインダッシュボード: 左=ウォッチリスト / 中央=結果 / 右=ログ */
+    .dashboard {
+      display: grid;
+      grid-template-columns: 250px 1fr 300px;
+      min-height: 0;
+    }
+
+    @media (max-width:1200px) {
+      .dashboard {
+        grid-template-columns: 220px 1fr;
+      }
+
+      .log-panel {
+        display: none;
+      }
+    }
+
+    @media (max-width:820px) {
+      .dashboard {
+        grid-template-columns: 1fr;
+      }
+
+      .watchlist-panel {
+        display: none;
+      }
+    }
+
+    .results-panel {
+      padding: 22px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      position: relative;
+      min-height: 60vh;
+    }
+
+    /* ウォッチリストパネル */
+    .watchlist-panel {
+      border-right: 1px solid var(--border);
+      padding: 14px 12px;
+      overflow-y: auto;
+      background: rgba(10, 8, 4, 0.6);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .watchlist-panel h3 {
+      color: var(--neon-cyan);
+      font-size: 11px;
+      letter-spacing: 3px;
+      margin-bottom: 6px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 8px;
+    }
+
+    .watch-empty {
+      color: var(--text-dim);
+      font-size: 10px;
+      letter-spacing: 0.5px;
+      padding: 10px 2px;
+      line-height: 1.7;
+    }
+
+    .watch-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 8px 8px 6px;
+      border: 1px solid rgba(255, 153, 0, 0.08);
+      background: rgba(255, 153, 0, 0.03);
+      cursor: pointer;
+      position: relative;
+      transition: background .15s, border-color .15s;
+    }
+
+    .watch-row:hover {
+      background: rgba(255, 153, 0, 0.1);
+      border-color: var(--border);
+    }
+
+    .watch-row.active {
+      border-color: var(--neon-blue);
+      box-shadow: 0 0 10px rgba(255, 153, 0, 0.25);
+    }
+
+    .watch-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .watch-name {
+      font-size: 10.5px;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-weight: 600;
+    }
+
+    .watch-code {
+      font-size: 9px;
+      color: var(--text-dim);
+      letter-spacing: 1px;
+    }
+
+    .watch-figures {
+      text-align: right;
+      flex-shrink: 0;
+    }
+
+    .watch-price {
+      font-size: 11.5px;
+      font-weight: bold;
+      line-height: 1.3;
+    }
+
+    .watch-pct {
+      font-size: 9px;
+      line-height: 1.3;
+    }
+
+    .watch-spark {
+      width: 46px;
+      height: 24px;
+      flex-shrink: 0;
+    }
+
+    .watch-remove {
+      position: absolute;
+      top: 1px;
+      right: 2px;
+      font-size: 11px;
+      color: var(--text-dim);
+      opacity: 0;
+      transition: opacity .15s;
+      padding: 2px 5px;
+      cursor: pointer;
+    }
+
+    .watch-row:hover .watch-remove {
+      opacity: 1;
+    }
+
+    .watch-remove:hover {
+      color: var(--neon-red);
+    }
+
+    .up {
+      color: var(--neon-green) !important;
+    }
+
+    .down {
+      color: var(--neon-red) !important;
+    }
+
+    .flat {
+      color: var(--text-dim) !important;
+    }
+
+    /* ログパネル */
+    .log-panel {
+      border-left: 1px solid var(--border);
+      padding: 16px 14px;
+      overflow-y: auto;
+      background: rgba(8, 6, 3, 0.6);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 11px;
+    }
+
+    .log-panel h3 {
+      color: var(--neon-cyan);
+      font-size: 11px;
+      letter-spacing: 3px;
+      margin-bottom: 10px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 8px;
+    }
+
+    .log-line {
+      color: var(--text-dim);
+      opacity: 0;
+      transform: translateX(8px);
+      animation: logIn .35s forwards;
+      line-height: 1.5;
+      word-break: break-all;
+    }
+
+    .log-line .ts {
+      color: var(--neon-purple);
+      margin-right: 6px;
+    }
+
+    .log-line.ok {
+      color: var(--neon-green);
+    }
+
+    @keyframes logIn {
+      to {
+        opacity: 1;
+        transform: translateX(0);
+      }
+    }
+
+    /* ティッカーテープ（ウォッチリスト銘柄が流れる） */
+    .ticker-tape {
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      background: rgba(20, 14, 0, 0.85);
+      overflow: hidden;
+      white-space: nowrap;
+      position: relative;
+      height: 30px;
+      display: flex;
+      align-items: center;
+    }
+
+    .ticker-tape.empty {
+      display: none;
+    }
+
+    .ticker-track {
+      display: inline-flex;
+      gap: 40px;
+      padding-left: 40px;
+      animation: tickerScroll linear infinite;
+    }
+
+    .ticker-tape:hover .ticker-track {
+      animation-play-state: paused;
+    }
+
+    @keyframes tickerScroll {
+      from {
+        transform: translateX(0);
+      }
+
+      to {
+        transform: translateX(-50%);
+      }
+    }
+
+    .ticker-item {
+      font-size: 11px;
+      letter-spacing: 1px;
+      color: var(--text-dim);
+      display: inline-flex;
+      gap: 6px;
+      align-items: baseline;
+    }
+
+    .ticker-item .tn {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    /* 下: 通信状態バー */
+    footer.statusbar {
+      border-top: 1px solid var(--border);
+      padding: 8px 24px;
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      color: var(--text-dim);
+      letter-spacing: 2px;
+      background: rgba(13, 10, 5, 0.7);
+    }
+
+    footer.statusbar b {
+      color: var(--neon-cyan);
+    }
+
+    /* スキャンフラッシュ演出 */
+    #scanFlash {
+      position: fixed;
+      inset: 0;
+      z-index: 60;
+      pointer-events: none;
+      background: linear-gradient(180deg, transparent, rgba(255, 153, 0, 0.35), transparent);
+      height: 100%;
+      transform: translateY(-100%);
+      opacity: 0;
+    }
+
+    #scanFlash.run {
+      animation: scanSweep .7s ease-out;
+    }
+
+    @keyframes scanSweep {
+      0% {
+        transform: translateY(-100%);
+        opacity: 0;
+      }
+
+      10% {
+        opacity: 1;
+      }
+
+      100% {
+        transform: translateY(100%);
+        opacity: 0;
+      }
+    }
+
+    /* ============ 起動アニメーション ============ */
+    #crt-boot {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      background: #000;
+      color: #ff9900;
+      font-family: var(--font-mono);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      text-align: left;
+      animation: bootOff 2.5s 1.5s forwards;
+    }
+
+    .boot-text p {
+      overflow: hidden;
+      white-space: nowrap;
+      border-right: .15em solid #ff9900;
+      margin: 0;
+      padding: 5px;
+      font-size: 14px;
+      width: 0;
+      animation: typing 0.5s steps(40, end) forwards, blink-caret .75s step-end infinite;
+    }
+
+    .boot-text p:nth-child(1) {
+      animation-delay: 0s, 0s;
+    }
+
+    .boot-text p:nth-child(2) {
+      animation-delay: 0.5s, 0.5s;
+    }
+
+    .boot-text p:nth-child(3) {
+      animation-delay: 0.8s, 0.8s;
+    }
+
+    .boot-text p:nth-child(4) {
+      animation-delay: 1.2s, 1.2s;
+    }
+
+    @keyframes typing {
+      from {
+        width: 0
+      }
+
+      to {
+        width: 100%;
+        border-color: transparent;
+      }
+    }
+
+    @keyframes blink-caret {
+
+      from,
+      to {
+        border-color: transparent
+      }
+
+      50% {
+        border-color: #ff9900;
+      }
+    }
+
+    @keyframes bootOff {
+      0% {
+        opacity: 1;
+      }
+
+      80% {
+        opacity: 1;
+        filter: brightness(1);
+      }
+
+      90% {
+        opacity: 1;
+        filter: brightness(3);
+        transform: scaleY(0.01);
+      }
+
+      100% {
+        opacity: 0;
+        transform: scaleY(0);
+        visibility: hidden;
+        pointer-events: none;
+      }
+    }
+
+    /* ============ カード ============ */
+    .card {
+      --accent: #ff9900;
+      background: linear-gradient(160deg, rgba(15, 11, 4, 0.9), rgba(5, 4, 2, 0.9));
+      border: 1px solid rgba(255, 153, 0, 0.12);
+      border-left: 3px solid var(--accent);
+      position: relative;
+      opacity: 0;
+      transform: translateY(24px) scale(0.94);
+      transition: transform .35s ease, box-shadow .35s ease, border-color .35s ease;
+      overflow: hidden;
+    }
+
+    .card.enter {
+      animation: buildIn 0.7s cubic-bezier(0.1, 0.9, 0.2, 1) forwards;
+    }
+
+    @keyframes buildIn {
+      0% {
+        opacity: 0;
+        clip-path: inset(0 0 100% 0);
+        filter: drop-shadow(0 0 20px var(--accent)) brightness(2);
+        transform: translateY(10px);
+      }
+
+      100% {
+        opacity: 1;
+        clip-path: inset(0 0 0% 0);
+        filter: drop-shadow(0 0 0px transparent) brightness(1);
+        transform: translateY(0);
+      }
+    }
+
+    .card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 0 20px var(--accent-glow, rgba(255, 153, 0, 0.35));
+      border-color: var(--accent);
+      z-index: 10;
+    }
+
+    .card::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background: radial-gradient(circle at 20% 0%, var(--accent) 0%, transparent 60%);
+      opacity: 0;
+      transition: opacity .4s;
+    }
+
+    .card:hover::before {
+      opacity: 0.12;
+    }
+
+    .card.status-error {
+      border-left-color: var(--neon-red);
+    }
+
+    .card.status-empty {
+      border-left-color: #555;
+    }
+
+    .card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      border-bottom: 1px solid rgba(255, 153, 0, 0.1);
+      background: rgba(255, 153, 0, 0.03);
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .card-head .site-tag {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      letter-spacing: 2px;
+      color: var(--accent);
+      text-shadow: 0 0 8px var(--accent);
+    }
+
+    .card-head .site-tag .icon {
+      width: 20px;
+      height: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--accent);
+      font-size: 11px;
+      flex-shrink: 0;
+    }
+
+    .card-head .site-tag .count-badge {
+      font-size: 9px;
+      color: #000;
+      background: var(--accent);
+      padding: 1px 7px;
+      border-radius: 10px;
+      letter-spacing: 0;
+      font-weight: bold;
+    }
+
+    .card-head .head-right {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .card-head .fetched-at {
+      font-size: 9px;
+      color: var(--text-dim);
+      letter-spacing: 1px;
+    }
+
+    .card-head .toggle-arrow {
+      font-size: 11px;
+      color: var(--accent);
+      transition: transform .25s;
+    }
+
+    .card.collapsed .toggle-arrow {
+      transform: rotate(-90deg);
+    }
+
+    .card-hero {
+      width: 100%;
+      height: 130px;
+      object-fit: cover;
+      display: block;
+      filter: saturate(1.3) contrast(1.1) sepia(0.8) hue-rotate(-20deg);
+      border-bottom: 1px solid rgba(255, 153, 0, 0.1);
+      background: #0d0a05;
+    }
+
+    .card-meta-line {
+      padding: 8px 14px;
+      font-size: 10.5px;
+      color: var(--neon-cyan);
+      border-bottom: 1px dashed rgba(255, 153, 0, 0.15);
+    }
+
+    .card-list {
+      max-height: 480px;
+      overflow-y: auto;
+      transition: max-height .3s ease, padding .3s ease;
+    }
+
+    .card.collapsed .card-list {
+      max-height: 0;
+      overflow: hidden;
+    }
+
+    .item-row {
+      display: flex;
+      gap: 10px;
+      padding: 10px 14px;
+      border-bottom: 1px solid rgba(255, 153, 0, 0.05);
+      transition: background .15s;
+    }
+
+    .item-row:hover {
+      background: rgba(255, 153, 0, 0.08);
+    }
+
+    .item-row:last-child {
+      border-bottom: none;
+    }
+
+    .item-thumb {
+      width: 56px;
+      height: 42px;
+      object-fit: cover;
+      flex-shrink: 0;
+      border: 1px solid rgba(255, 153, 0, 0.2);
+      background: #0d0a05;
+      filter: sepia(0.8) hue-rotate(-20deg) saturate(2);
+    }
+
+    .item-thumb-fallback {
+      width: 56px;
+      height: 42px;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid rgba(255, 153, 0, 0.2);
+      color: var(--accent);
+      opacity: .45;
+      font-size: 16px;
+    }
+
+    .item-index {
+      width: 26px;
+      flex-shrink: 0;
+      font-size: 10px;
+      color: var(--text-dim);
+      text-align: right;
+      padding-top: 2px;
+    }
+
+    .item-main {
+      min-width: 0;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .item-title {
+      font-size: 11.5px;
+      color: var(--text);
+      text-decoration: none;
+      line-height: 1.4;
+      font-weight: 600;
+    }
+
+    .item-title:hover {
+      color: var(--accent);
+      text-shadow: 0 0 6px var(--accent);
+    }
+
+    .item-snippet {
+      font-size: 10px;
+      color: var(--text-dim);
+      line-height: 1.5;
+    }
+
+    .item-meta {
+      font-size: 9.5px;
+      color: var(--neon-green);
+      letter-spacing: 0.5px;
+    }
+
+    .empty-state {
+      grid-column: 1/-1;
+      text-align: center;
+      color: var(--text-dim);
+      padding: 60px 20px;
+      font-size: 12px;
+      letter-spacing: 2px;
+    }
+
+    .empty-state .big {
+      font-size: 40px;
+      margin-bottom: 14px;
+      color: var(--neon-blue);
+      opacity: .4;
+    }
+
+    /* ============ モーダル共通 ============ */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 200;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(2px);
+      align-items: flex-start;
+      justify-content: center;
+      overflow-y: auto;
+      padding: 40px 16px;
+    }
+
+    .modal-overlay.open {
+      display: flex;
+    }
+
+    .modal-box {
+      width: 100%;
+      max-width: 880px;
+      background: linear-gradient(160deg, rgba(15, 11, 4, 0.98), rgba(5, 4, 2, 0.98));
+      border: 1px solid var(--neon-blue);
+      box-shadow: 0 0 40px rgba(255, 153, 0, 0.25);
+      animation: modalIn .25s ease-out;
+    }
+
+    @keyframes modalIn {
+      from {
+        opacity: 0;
+        transform: translateY(-12px);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    .modal-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255, 153, 0, 0.05);
+    }
+
+    .modal-head h2 {
+      font-size: 13px;
+      letter-spacing: 3px;
+      color: var(--neon-blue);
+    }
+
+    .modal-close {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      font-family: var(--font-mono);
+      font-size: 14px;
+      padding: 2px 10px;
+      cursor: pointer;
+    }
+
+    .modal-close:hover {
+      color: var(--neon-red);
+      border-color: var(--neon-red);
+    }
+
+    .modal-body {
+      padding: 18px 20px 22px;
+    }
+
+    .mform {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: flex-end;
+      margin-bottom: 16px;
+    }
+
+    .mform .mfield {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .mform label {
+      font-size: 9px;
+      letter-spacing: 1px;
+      color: var(--text-dim);
+    }
+
+    .mform input,
+    .mform select {
+      background: rgba(255, 153, 0, 0.04);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      padding: 8px 10px;
+      outline: none;
+      min-width: 120px;
+    }
+
+    .mform input:focus,
+    .mform select:focus {
+      border-color: var(--neon-blue);
+    }
+
+    .mform button {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      letter-spacing: 1px;
+      padding: 8px 16px;
+      background: var(--neon-blue);
+      color: #000;
+      border: none;
+      cursor: pointer;
+      font-weight: bold;
+    }
+
+    .mform button:hover {
+      box-shadow: 0 0 14px var(--neon-blue);
+    }
+
+    .mtable {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+    }
+
+    .mtable th {
+      text-align: right;
+      color: var(--neon-cyan);
+      font-weight: 600;
+      letter-spacing: 1px;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+      font-size: 9.5px;
+    }
+
+    .mtable th:first-child,
+    .mtable td:first-child {
+      text-align: left;
+    }
+
+    .mtable td {
+      text-align: right;
+      padding: 9px 10px;
+      border-bottom: 1px solid rgba(255, 153, 0, 0.06);
+      color: var(--text);
+    }
+
+    .mtable tr:hover td {
+      background: rgba(255, 153, 0, 0.05);
+    }
+
+    .mtable .mname {
+      font-weight: 600;
+    }
+
+    .mtable .mcode {
+      display: block;
+      font-size: 9px;
+      color: var(--text-dim);
+    }
+
+    .mtable .mdel {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      font-size: 10px;
+      padding: 3px 8px;
+      cursor: pointer;
+    }
+
+    .mtable .mdel:hover {
+      color: var(--neon-red);
+      border-color: var(--neon-red);
+    }
+
+    .m-empty {
+      color: var(--text-dim);
+      font-size: 11px;
+      text-align: center;
+      padding: 24px 0;
+      letter-spacing: 1px;
+    }
+
+    .portfolio-summary {
+      display: flex;
+      gap: 24px;
+      flex-wrap: wrap;
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px dashed rgba(255, 153, 0, 0.2);
+    }
+
+    .portfolio-summary .ps-item {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .portfolio-summary .ps-label {
+      font-size: 9px;
+      color: var(--text-dim);
+      letter-spacing: 1px;
+    }
+
+    .portfolio-summary .ps-value {
+      font-size: 16px;
+      font-weight: bold;
+      font-family: var(--font-mono);
+    }
+
+    .alert-fired {
+      opacity: 0.5;
+    }
+
+    .alert-fired .mdel {
+      color: var(--neon-green);
+      border-color: var(--neon-green);
+    }
+
+    .compare-checks {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .compare-check {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+
+    .compare-check input {
+      accent-color: var(--neon-blue);
+    }
+
+    .compare-legend {
+      display: flex;
+      gap: 14px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+      font-size: 10px;
+    }
+
+    .compare-legend .cl-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .compare-legend .cl-swatch {
+      width: 10px;
+      height: 10px;
+      display: inline-block;
+    }
+
+    #compareCanvas {
+      width: 100%;
+      height: 280px;
+      display: block;
+      background: rgba(255, 153, 0, 0.02);
+    }
+
+    .cal-empty {
+      color: var(--text-dim);
+      font-size: 11px;
+      text-align: center;
+      padding: 24px 0;
+    }
+
+    .cal-days-left {
+      font-size: 9px;
+      color: var(--neon-cyan);
+    }
+
+    .cal-days-left.soon {
+      color: var(--neon-red);
+      font-weight: bold;
+    }
+
+    .indicator-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-left: 8px;
+    }
+
+    .indicator-chip {
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      letter-spacing: 0.5px;
+      padding: 3px 9px;
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      cursor: pointer;
+      background: transparent;
+    }
+
+    .indicator-chip:hover {
+      color: var(--text);
+    }
+
+    .indicator-chip.active {
+      color: #000;
+      font-weight: bold;
+    }
+
+    .indicator-chip[data-ind="sma5"].active {
+      background: #00c2ff;
+      border-color: #00c2ff;
+    }
+
+    .indicator-chip[data-ind="sma25"].active {
+      background: #ffb84d;
+      border-color: #ffb84d;
+    }
+
+    .indicator-chip[data-ind="sma75"].active {
+      background: #eae6da;
+      border-color: #eae6da;
+    }
+
+    .indicator-chip[data-ind="bb"].active {
+      background: #c792ff;
+      border-color: #c792ff;
+    }
+
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: rgba(255, 153, 0, 0.25);
+      border-radius: 4px;
+    }
+  </style>
+</head>
+
+<body>
+
+  <div id="crt-boot">
+    <div class="boot-text">
+      <p>INIT TERMINAL BOOT SEQUENCE...</p>
+      <p>LOADING MARKET MODULES [OK]</p>
+      <p>ESTABLISHING DATA LINK [OK]</p>
+      <p>MARKET INTELLIGENCE SYSTEM ONLINE</p>
+    </div>
+  </div>
+
+  <canvas id="bg-canvas"></canvas>
+  <div class="grid-bg"></div>
+  <div class="scanlines"></div>
+  <div class="vignette"></div>
+  <div id="scanFlash"></div>
+
+  <div id="app">
+    <header class="titlebar">
+      <div class="brand">
+        <div class="glyph">Ψ</div>
+        <div>
+          <h1>TERMINAL // MARKET INTELLIGENCE</h1>
+          <span class="sub">REAL-TIME QUOTES &amp; NEWS MONITOR</span>
+        </div>
+      </div>
+      <div class="header-right">
+        <span class="header-clock" id="clock"></span>
+        <div class="status-chip" id="connStatus">SYSTEM ONLINE</div>
+      </div>
+    </header>
+
+    <div class="fnbar">
+      <div class="fnkey" data-action="open-portfolio"><b>F1</b>PORTFOLIO</div>
+      <div class="fnkey" data-action="open-alerts"><b>F2</b>ALERTS</div>
+      <div class="fnkey" data-action="open-compare"><b>F3</b>COMPARE</div>
+      <div class="fnkey" data-action="open-calendar"><b>F4</b>CALENDAR</div>
+    </div>
+
+    <div class="pulse-tape" id="pulseTape">
+      <span class="pulse-label">MARKET PULSE</span>
+      <div class="pulse-track" id="pulseTrack">
+        <span class="pulse-item">グローバルヘッドラインを取得中...</span>
+      </div>
+    </div>
+
+    <div class="search-zone">
+      <div class="search-input-wrap">
+        <input id="queryInput" type="text" placeholder="銘柄名・コード・キーワードを入力し MONITOR を実行してください..." autocomplete="off" />
+        <div id="suggestBox"></div>
+      </div>
+      <button id="watchBtn" title="ウォッチリストに追加（画面遷移なし）">＋ WATCH</button>
+      <button id="searchBtn">START MONITORING ▷</button>
+    </div>
+
+    <div id="stockBanner">
+      <div class="sb-left">
+        <span id="stockName"></span>
+        <span id="stockCode"></span>
+      </div>
+      <div class="sb-right">
+        <span id="stockPrice"></span>
+        <span id="stockChange"></span>
+        <span id="stockChangePct"></span>
+        <button class="sb-add-btn" id="bannerAddBtn">＋ WATCH</button>
+        <span class="delay-tag">※Yahoo!ファイナンス提供データ（銘柄により最大20分ディレイ）</span>
+      </div>
+    </div>
+    <div id="stockDetailRow" style="display:none;">
+      <span class="dt-item">始値 <b id="dtOpen">--</b></span>
+      <span class="dt-item hi">高値 <b id="dtHigh">--</b></span>
+      <span class="dt-item lo">安値 <b id="dtLow">--</b></span>
+      <span class="dt-item">前日終値 <b id="dtPrevClose">--</b></span>
+      <span class="dt-item">出来高 <b id="dtVolume">--</b></span>
+      <span class="dt-item">52週レンジ <b id="dtYearRange">--</b></span>
+      <span class="dt-item">時価総額 <b id="dtMarketCap">--</b></span>
+    </div>
+
+    <div id="chartPanel">
+      <div class="chart-head">
+        <span class="chart-title">// PRICE CHART</span>
+        <div class="chart-intervals" id="chartIntervals">
+          <button class="chart-interval-btn" data-interval="1m">1分足</button>
+          <button class="chart-interval-btn" data-interval="5m">5分足</button>
+          <button class="chart-interval-btn" data-interval="15m">15分足</button>
+          <button class="chart-interval-btn" data-interval="60m">1時間足</button>
+          <button class="chart-interval-btn active" data-interval="1d">日足</button>
+          <button class="chart-interval-btn" data-interval="1wk">週足</button>
+          <button class="chart-interval-btn" data-interval="1mo">月足</button>
+        </div>
+        <div class="chart-tools">
+          <button class="chart-tool-btn" id="chartZoomInBtn" title="ズームイン">＋</button>
+          <button class="chart-tool-btn" id="chartZoomOutBtn" title="ズームアウト">－</button>
+          <button class="chart-tool-btn" id="chartResetBtn" title="表示をリセット">⟲</button>
+        </div>
+        <div class="indicator-row" id="indicatorRow">
+          <button class="indicator-chip" data-ind="sma5">SMA5</button>
+          <button class="indicator-chip" data-ind="sma25">SMA25</button>
+          <button class="indicator-chip" data-ind="sma75">SMA75</button>
+          <button class="indicator-chip" data-ind="bb">BB(20,2σ)</button>
+        </div>
+        <span class="chart-status" id="chartStatus"></span>
+      </div>
+      <div class="chart-canvas-wrap" id="chartCanvasWrap">
+        <canvas id="chartCanvas" width="900" height="210"></canvas>
+        <canvas id="volumeCanvas" width="900" height="70"></canvas>
+      </div>
+      <div class="chart-hint">ドラッグで左右移動 ／ マウスホイールまたは＋－でズーム ／ スマホは指でドラッグ・ピンチでズーム</div>
+    </div>
+
+    <div class="dashboard">
+      <aside class="watchlist-panel" id="watchlistPanel">
+        <h3>// WATCHLIST</h3>
+        <div id="watchlistBody">
+          <div class="watch-empty">まだ銘柄が登録されていません。<br>検索欄に銘柄名を入力し「＋ WATCH」で追加できます。</div>
+        </div>
+      </aside>
+
+      <main class="results-panel" id="resultsPanel">
+        <div class="empty-state" id="emptyState">
+          <div class="big">◇</div>
+          キーワードを入力してモニタリングを開始してください<br>
+          60秒ごとに新規ニュースを巡回し、自動的に画面に追加します<br>
+        </div>
+      </main>
+
+      <aside class="log-panel" id="logPanel">
+        <h3>// LIVE LOG</h3>
+        <div id="logStream"></div>
+      </aside>
+    </div>
+
+    <div class="ticker-tape empty" id="tickerTape">
+      <div class="ticker-track" id="tickerTrack"></div>
+    </div>
+
+    <footer class="statusbar">
+      <span>LINK: <b id="linkState">STANDBY</b></span>
+      <span id="progressState">ARTICLES FOUND: 0</span>
+      <span id="marketStatus">MARKET: --</span>
+    </footer>
+  </div>
+
+  <!-- ==================== ポートフォリオ ==================== -->
+  <div class="modal-overlay" id="portfolioModal">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h2>// PORTFOLIO</h2>
+        <button class="modal-close" data-close-modal>✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="mform">
+          <div class="mfield">
+            <label>銘柄名 / コード</label>
+            <div style="position: relative;">
+              <input type="text" id="pfQuery" placeholder="例: トヨタ自動車" autocomplete="off">
+              <div id="pfSuggestBox" class="suggest-box"
+                style="position:absolute; top:100%; left:0; width:100%; background:var(--bg-panel); border:1px solid var(--border); border-top:none; max-height:250px; overflow-y:auto; z-index:100; display:none;">
+              </div>
+            </div>
+          </div>
+          <div class="mfield">
+            <label>数量</label>
+            <input type="number" id="pfQty" placeholder="100" min="0" step="1">
+          </div>
+          <div class="mfield">
+            <label>取得単価</label>
+            <input type="number" id="pfAvgCost" placeholder="2500" min="0" step="0.1">
+          </div>
+          <button id="pfAddBtn">＋ 追加</button>
+        </div>
+        <div style="overflow-x:auto;">
+          <table class="mtable">
+            <thead>
+              <tr>
+                <th>銘柄</th>
+                <th>数量</th>
+                <th>取得単価</th>
+                <th>現在値</th>
+                <th>評価額</th>
+                <th>評価損益</th>
+                <th>損益率</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="pfTableBody"></tbody>
+          </table>
+        </div>
+        <div class="portfolio-summary" id="pfSummary"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 価格アラート ==================== -->
+  <div class="modal-overlay" id="alertsModal">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h2>// PRICE ALERTS</h2>
+        <button class="modal-close" data-close-modal>✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="mform">
+          <div class="mfield">
+            <label>銘柄名 / コード</label>
+            <div style="position: relative;">
+              <input type="text" id="alQuery" placeholder="例: 任天堂" autocomplete="off">
+              <div id="alSuggestBox" class="suggest-box"
+                style="position:absolute; top:100%; left:0; width:100%; background:var(--bg-panel); border:1px solid var(--border); border-top:none; max-height:250px; overflow-y:auto; z-index:100; display:none;">
+              </div>
+            </div>
+          </div>
+          <div class="mfield">
+            <label>条件</label>
+            <select id="alCondition">
+              <option value="above">以上になったら</option>
+              <option value="below">以下になったら</option>
+            </select>
+          </div>
+          <div class="mfield">
+            <label>価格</label>
+            <input type="number" id="alPrice" placeholder="1000" min="0" step="0.1">
+          </div>
+          <button id="alAddBtn">＋ アラート追加</button>
+        </div>
+        <p style="font-size:10px;color:var(--text-dim);margin:-8px 0 14px;letter-spacing:0.5px;">
+          条件成立時にブラウザ通知＋音で知らせます（初回追加時に通知の許可を求めます）。一度発火したアラートは自動的に停止します。
+        </p>
+        <table class="mtable">
+          <thead>
+            <tr>
+              <th>銘柄</th>
+              <th>条件</th>
+              <th>状態</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="alTableBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 銘柄比較チャート ==================== -->
+  <div class="modal-overlay" id="compareModal">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h2>// COMPARE (騰落率比較)</h2>
+        <button class="modal-close" data-close-modal>✕</button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size:10px;color:var(--text-dim);margin-bottom:10px;letter-spacing:0.5px;">
+          ウォッチリストの銘柄から2つ以上選択すると、期間開始時点を0%とした騰落率で重ね合わせ表示します。
+        </p>
+        <div class="compare-checks" id="compareChecklist"></div>
+        <div class="mform" style="margin-bottom:8px;">
+          <div class="mfield">
+            <label>期間</label>
+            <select id="compareInterval">
+              <option value="1d">日足(2年)</option>
+              <option value="1wk">週足</option>
+              <option value="60m">1時間足</option>
+            </select>
+          </div>
+          <button id="compareRunBtn">比較表示</button>
+        </div>
+        <canvas id="compareCanvas" width="820" height="280"></canvas>
+        <div class="compare-legend" id="compareLegend"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== 決算カレンダー ==================== -->
+  <div class="modal-overlay" id="calendarModal">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h2>// EARNINGS CALENDAR</h2>
+        <button class="modal-close" data-close-modal>✕</button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size:10px;color:var(--text-dim);margin-bottom:10px;letter-spacing:0.5px;">
+          ウォッチリスト・ポートフォリオに登録中の銘柄の決算予定日を近い順に表示します（データ提供元の都合上、取得できない銘柄もあります）。
+        </p>
+        <table class="mtable">
+          <thead>
+            <tr>
+              <th>銘柄</th>
+              <th>次回決算予定日</th>
+              <th>残り日数</th>
+            </tr>
+          </thead>
+          <tbody id="calTableBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    /* =========================================================
+       背景: 動く六角形 + 粒子 + ネットワーク線 (Canvas)
+       ========================================================= */
+    const canvas = document.getElementById('bg-canvas');
+    const ctx = canvas.getContext('2d');
+    let W, H;
+    function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+    window.addEventListener('resize', resize); resize();
+
+    const PARTICLES = Array.from({ length: 60 }, () => ({
+      x: Math.random() * W, y: Math.random() * H,
+      vx: (Math.random() - 0.5) * 0.25, vy: (Math.random() - 0.5) * 0.25,
+      r: Math.random() * 1.6 + 0.4
+    }));
+
+    function drawHex(cx, cy, size, rot, alpha) {
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const a = rot + i * Math.PI / 3;
+        const x = cx + size * Math.cos(a), y = cy + size * Math.sin(a);
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+      ctx.strokeStyle = `rgba(255,153,0,${alpha})`;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+
+    let t = 0;
+    function animateBg() {
+      ctx.clearRect(0, 0, W, H);
+      drawHex(W * 0.85, H * 0.2, 70, t * 0.001, 0.10);
+      drawHex(W * 0.12, H * 0.75, 100, -t * 0.0007, 0.07);
+      drawHex(W * 0.5, H * 0.9, 50, t * 0.0015, 0.08);
+
+      for (const p of PARTICLES) {
+        p.x += p.vx; p.y += p.vy;
+        if (p.x < 0 || p.x > W) p.vx *= -1;
+        if (p.y < 0 || p.y > H) p.vy *= -1;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255,153,0,0.45)';
+        ctx.fill();
+      }
+      for (let i = 0; i < PARTICLES.length; i++) {
+        for (let j = i + 1; j < PARTICLES.length; j++) {
+          const a = PARTICLES[i], b = PARTICLES[j];
+          const d = Math.hypot(a.x - b.x, a.y - b.y);
+          if (d < 120) {
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+            ctx.strokeStyle = `rgba(255,153,0,${0.07 * (1 - d / 120)})`;
+            ctx.stroke();
+          }
+        }
+      }
+      t++;
+      requestAnimationFrame(animateBg);
+    }
+    animateBg();
+
+    /* 時計 */
+    function tickClock() {
+      document.getElementById('clock').textContent = new Date().toLocaleTimeString('ja-JP', { hour12: false });
+    }
+    setInterval(tickClock, 1000); tickClock();
+
+    /* =========================================================
+       要素参照
+       ========================================================= */
+    const queryInput = document.getElementById('queryInput');
+    const suggestBox = document.getElementById('suggestBox');
+    const searchBtn = document.getElementById('searchBtn');
+    const watchBtn = document.getElementById('watchBtn');
+    const bannerAddBtn = document.getElementById('bannerAddBtn');
+    const resultsPanel = document.getElementById('resultsPanel');
+    const emptyState = document.getElementById('emptyState');
+    const logStream = document.getElementById('logStream');
+    const scanFlash = document.getElementById('scanFlash');
+    const linkState = document.getElementById('linkState');
+    const progressState = document.getElementById('progressState');
+    const marketStatusEl = document.getElementById('marketStatus');
+    const watchlistBody = document.getElementById('watchlistBody');
+    const tickerTape = document.getElementById('tickerTape');
+    const tickerTrack = document.getElementById('tickerTrack');
+
+    /* =========================================================
+       モーダル共通の開閉制御（ポートフォリオ／アラート／比較／カレンダー）
+       ========================================================= */
+    function openModal(id) {
+      document.getElementById(id).classList.add('open');
+    }
+    function closeModal(id) {
+      document.getElementById(id).classList.remove('open');
+    }
+    document.querySelectorAll('.modal-overlay').forEach(overlay => {
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) overlay.classList.remove('open');
+      });
+    });
+    document.querySelectorAll('[data-close-modal]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.target.closest('.modal-overlay').classList.remove('open');
+      });
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        document.querySelectorAll('.modal-overlay.open').forEach(o => o.classList.remove('open'));
+      }
+    });
+
+    /* =========================================================
+       サジェスト（銘柄オートコンプリート）共通処理
+       ========================================================= */
+    function setupSuggestBox(inputEl, boxEl, onSelect, onEnterSubmit) {
+      let suggestDebounce = null;
+      let currentFocus = -1;
+
+      inputEl.addEventListener('input', () => {
+        clearTimeout(suggestDebounce);
+        const q = inputEl.value.trim();
+        if (!q) { boxEl.style.display = 'none'; return; }
+
+        suggestDebounce = setTimeout(async () => {
+          try {
+            const res = await fetch(`/api/suggest?q=${encodeURIComponent(q)}`);
+            const data = await res.json();
+            if (!data || data.length === 0) {
+              boxEl.style.display = 'none';
+              return;
+            }
+            boxEl.innerHTML = '';
+            data.forEach((item) => {
+              const div = document.createElement('div');
+              div.className = 'suggest-item';
+              div.innerHTML = `<span class="name">${escapeHtml(item.name)}</span><span class="code">${escapeHtml(item.code)}</span>`;
+              div.addEventListener('click', () => {
+                inputEl.value = item.name;
+                boxEl.style.display = 'none';
+                if (onSelect) onSelect(item);
+              });
+              boxEl.appendChild(div);
+            });
+            boxEl.style.display = 'block';
+            currentFocus = -1;
+          } catch (e) {
+            console.error(e);
+          }
+        }, 300);
+      });
+
+      inputEl.addEventListener('keydown', (e) => {
+        const items = boxEl.getElementsByClassName('suggest-item');
+        if (e.key === 'ArrowDown') {
+          if (boxEl.style.display === 'block') { e.preventDefault(); currentFocus++; addActive(items); }
+        } else if (e.key === 'ArrowUp') {
+          if (boxEl.style.display === 'block') { e.preventDefault(); currentFocus--; addActive(items); }
+        } else if (e.key === 'Enter') {
+          if (boxEl.style.display === 'block' && currentFocus > -1 && items.length > 0) {
+            e.preventDefault();
+            items[currentFocus].click();
+          } else if (onEnterSubmit) {
+            e.preventDefault();
+            boxEl.style.display = 'none';
+            onEnterSubmit();
+          }
+        } else if (e.key === 'Escape') {
+          boxEl.style.display = 'none';
+        }
+      });
+
+      function addActive(items) {
+        if (!items || items.length === 0) return false;
+        removeActive(items);
+        if (currentFocus >= items.length) currentFocus = 0;
+        if (currentFocus < 0) currentFocus = (items.length - 1);
+        items[currentFocus].classList.add('focused');
+        items[currentFocus].scrollIntoView({ block: 'nearest' });
+      }
+      function removeActive(items) {
+        for (let i = 0; i < items.length; i++) items[i].classList.remove('focused');
+      }
+
+      document.addEventListener('click', (e) => {
+        if (e.target !== inputEl && !boxEl.contains(e.target)) boxEl.style.display = 'none';
+      });
+    }
+
+    setupSuggestBox(queryInput, suggestBox, () => runSearch(), () => runSearch());
+    setupSuggestBox(document.getElementById('pfQuery'), document.getElementById('pfSuggestBox'));
+    setupSuggestBox(document.getElementById('alQuery'), document.getElementById('alSuggestBox'));
+
+    /* グローバルショートカット: "/" で検索欄にフォーカス */
+    document.addEventListener('keydown', (e) => {
+      if (e.key === '/' && document.activeElement !== queryInput) {
+        e.preventDefault();
+        queryInput.focus();
+      }
+    });
+
+    /* ファンクションキーバー: 各パネルへのスクロール／モーダルの起動 */
+    document.querySelector('.fnbar').addEventListener('click', (e) => {
+      const btn = e.target.closest('.fnkey');
+      if (!btn) return;
+      const action = btn.dataset.action;
+      const scrollTo = (el) => el && el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      switch (action) {
+        case 'focus-search': queryInput.focus(); break;
+        case 'scroll-watchlist': scrollTo(document.getElementById('watchlistPanel')); break;
+        case 'scroll-news': scrollTo(document.getElementById('resultsPanel')); break;
+        case 'scroll-chart': scrollTo(document.getElementById('chartPanel')); break;
+        case 'scroll-log': scrollTo(document.getElementById('logPanel')); break;
+        case 'open-portfolio': openModal('portfolioModal'); renderPortfolio(); break;
+        case 'open-alerts': openModal('alertsModal'); renderAlerts(); break;
+        case 'open-compare': openModal('compareModal'); renderCompareChecklist(); break;
+        case 'open-calendar': openModal('calendarModal'); loadCalendar(); break;
+      }
+    });
+
+    function pushLog(msg, ok = false) {
+      const line = document.createElement('div');
+      line.className = 'log-line' + (ok ? ' ok' : '');
+      const ts = new Date().toLocaleTimeString('ja-JP', { hour12: false });
+      line.innerHTML = `<span class="ts">[${ts}]</span> > ${escapeHtml(msg)}`;
+      logStream.appendChild(line);
+      logStream.parentElement.scrollTop = logStream.parentElement.scrollHeight;
+      while (logStream.children.length > 80) logStream.removeChild(logStream.firstChild);
+    }
+
+    function escapeHtml(str) {
+      const d = document.createElement('div');
+      d.textContent = str ?? '';
+      return d.innerHTML;
+    }
+
+    function hexToRgba(hex, alpha) {
+      if (!hex) return `rgba(255,153,0,${alpha})`;
+      const h = hex.replace('#', '');
+      const bigint = parseInt(h.length === 3 ? h.split('').map(c => c + c).join('') : h, 16);
+      const r = (bigint >> 16) & 255, g = (bigint >> 8) & 255, b = bigint & 255;
+      return `rgba(${r},${g},${b},${alpha})`;
+    }
+
+    /* =========================================================
+       ニュース／結果カード
+       ========================================================= */
+    function makeCard(data, index) {
+      const card = document.createElement('div');
+      card.className = 'card status-' + (data.status || 'ok');
+      const accent = data.color || '#ff9900';
+      card.style.setProperty('--accent', accent);
+      card.style.setProperty('--accent-glow', hexToRgba(accent, 0.35));
+      card.style.animationDelay = (index * 0.05) + 's';
+
+      const items = Array.isArray(data.items) ? data.items : [];
+      const iconChar = data.icon || '◆';
+
+      const heroHtml = data.hero_image
+        ? `<img class="card-hero" src="${data.hero_image}" alt="" onerror="this.remove()">`
+        : '';
+
+      const rowsHtml = items.map((it, i) => {
+        const thumb = it.image
+          ? `<img class="item-thumb" src="${it.image}" alt="" onerror="this.replaceWith(thumbFallback('${iconChar.replace(/'/g, "")}'))">`
+          : `<div class="item-thumb-fallback">${escapeHtml(iconChar)}</div>`;
+        return `
+      <div class="item-row">
+        <span class="item-index">${i + 1}</span>
+        ${thumb}
+        <div class="item-main">
+          ${it.url
+            ? `<a class="item-title" href="${it.url}" target="_blank" rel="noopener">${escapeHtml(it.title || '(no title)')}</a>`
+            : `<span class="item-title">${escapeHtml(it.title || '(no title)')}</span>`}
+          ${it.snippet ? `<div class="item-snippet">${escapeHtml(it.snippet)}</div>` : ''}
+          ${it.meta ? `<div class="item-meta">${escapeHtml(it.meta)}</div>` : ''}
+        </div>
+      </div>`;
+      }).join('');
+
+      const bodyHtml = items.length
+        ? `<div class="card-list">${rowsHtml}</div>`
+        : `<div class="card-list"><div class="item-row"><div class="item-main"><span class="item-snippet">${escapeHtml(data.summary || 'データが見つかりませんでした')}</span></div></div></div>`;
+
+      card.innerHTML = `
+    <div class="card-head">
+      <div class="site-tag">
+        <span class="icon">${escapeHtml(iconChar)}</span>
+        ${escapeHtml(data.site)}
+        <span class="count-badge">${data.total_items || 0} NEW</span>
+      </div>
+      <div class="head-right">
+        <span class="fetched-at">${escapeHtml(data.fetched_at || '')}</span>
+        <span class="toggle-arrow">▾</span>
+      </div>
+    </div>
+    ${heroHtml}
+    ${data.summary ? `<div class="card-meta-line">${escapeHtml(data.summary)}</div>` : ''}
+    ${bodyHtml}
+  `;
+
+      card.querySelector('.card-head').addEventListener('click', () => {
+        card.classList.toggle('collapsed');
+      });
+
+      return card;
+    }
+
+    function thumbFallback(icon) {
+      const div = document.createElement('div');
+      div.className = 'item-thumb-fallback';
+      div.textContent = icon;
+      return div;
+    }
+
+    /* =========================================================
+       メイン検索（銘柄バナー + ニュースストリーム）
+       ========================================================= */
+    let totalHits = 0;
+    let currentEventSource = null;
+    let currentQuery = null;
+    let lastBannerPrice = null;
+
+    // ニュースフィード: バッチ(SSEの'result'イベント)ごとにカードを積み上げるのではなく、
+    // 全記事を1つのリストにマージ→公開日時で降順ソートし、常に「最新の見出しが一番上」になるよう
+    // 単一カードを都度再描画する。
+    let newsFeedItems = [];
+    let newsFeedCard = null;
+    let newsFeedCollapsed = false;
+
+    // 銘柄チャートパネル（複数の足に対応）
+    let currentChartInterval = '1d';
+    let currentChartQuery = null;
+    let chartLoadedForQuery = null;
+    let lastChartPoints = null;
+
+    function mergeNewsItems(items) {
+      const seen = new Set(newsFeedItems.map(it => it.url).filter(Boolean));
+      for (const it of items) {
+        if (it.url && seen.has(it.url)) continue;
+        if (it.url) seen.add(it.url);
+        newsFeedItems.push(it);
+      }
+      newsFeedItems.sort((a, b) => {
+        const ta = a.pub_date ? (new Date(a.pub_date).getTime() || 0) : 0;
+        const tb = b.pub_date ? (new Date(b.pub_date).getTime() || 0) : 0;
+        return tb - ta; // 新しい順
+      });
+      if (newsFeedItems.length > 300) newsFeedItems.length = 300; // 際限なく肥大化しないよう上限
+    }
+
+    function renderNewsFeed(fetchedAt) {
+      const data = {
+        site: 'News',
+        icon: '⌘',
+        color: '#00c2ff',
+        status: 'ok',
+        total_items: newsFeedItems.length,
+        fetched_at: fetchedAt || new Date().toLocaleTimeString('ja-JP', { hour12: false }),
+        summary: `${newsFeedItems.length}件のニュース（新着順・複数ソース横断）`,
+        items: newsFeedItems,
+      };
+      const newCard = makeCard(data, 0);
+      if (newsFeedCollapsed) newCard.classList.add('collapsed');
+      newCard.querySelector('.card-head').addEventListener('click', () => {
+        newsFeedCollapsed = newCard.classList.contains('collapsed');
+      });
+
+      if (newsFeedCard && newsFeedCard.parentElement) {
+        newsFeedCard.replaceWith(newCard);
+      } else {
+        resultsPanel.insertBefore(newCard, resultsPanel.firstChild);
+      }
+      requestAnimationFrame(() => newCard.classList.add('enter'));
+      newsFeedCard = newCard;
+    }
+
+    // X（旧Twitter）: キーワードに関するツイートをニュースと同じ「常時マージ&新着順ソート」方式で表示する
+    let tweetFeedItems = [];
+    let tweetFeedCard = null;
+    let tweetFeedCollapsed = false;
+    let tweetUnavailableNoted = false;
+
+    function mergeTweetItems(items) {
+      const seen = new Set(tweetFeedItems.map(it => it.url).filter(Boolean));
+      for (const it of items) {
+        if (it.url && seen.has(it.url)) continue;
+        if (it.url) seen.add(it.url);
+        tweetFeedItems.push(it);
+      }
+      tweetFeedItems.sort((a, b) => {
+        const ta = a.pub_date ? (new Date(a.pub_date).getTime() || 0) : 0;
+        const tb = b.pub_date ? (new Date(b.pub_date).getTime() || 0) : 0;
+        return tb - ta; // 新しい順
+      });
+      if (tweetFeedItems.length > 200) tweetFeedItems.length = 200;
+    }
+
+    function renderTweetFeed(fetchedAt) {
+      const data = {
+        site: 'X (Twitter)',
+        icon: '𝕏',
+        color: '#1d9bf0',
+        status: 'ok',
+        total_items: tweetFeedItems.length,
+        fetched_at: fetchedAt || new Date().toLocaleTimeString('ja-JP', { hour12: false }),
+        summary: `${tweetFeedItems.length}件のポスト（新着順）`,
+        items: tweetFeedItems,
+      };
+      const newCard = makeCard(data, 0);
+      if (tweetFeedCollapsed) newCard.classList.add('collapsed');
+      newCard.querySelector('.card-head').addEventListener('click', () => {
+        tweetFeedCollapsed = newCard.classList.contains('collapsed');
+      });
+
+      if (tweetFeedCard && tweetFeedCard.parentElement) {
+        tweetFeedCard.replaceWith(newCard);
+      } else if (newsFeedCard && newsFeedCard.parentElement) {
+        // ニュースフィードの直後に固定表示（毎回の再描画でも順序が入れ替わらないようにする）
+        newsFeedCard.after(newCard);
+      } else {
+        resultsPanel.insertBefore(newCard, resultsPanel.firstChild);
+      }
+      requestAnimationFrame(() => newCard.classList.add('enter'));
+      tweetFeedCard = newCard;
+    }
+
+    function fmtPrice(v) {
+      if (v === null || v === undefined || Number.isNaN(Number(v))) return '--';
+      return Number(v).toLocaleString('ja-JP', { maximumFractionDigits: 1 });
+    }
+    function fmtVolume(v) {
+      if (!v && v !== 0) return '--';
+      const n = Number(v);
+      if (n >= 1e8) return (n / 1e8).toFixed(2) + '億';
+      if (n >= 1e4) return (n / 1e4).toFixed(1) + '万';
+      return n.toLocaleString('ja-JP');
+    }
+    function fmtMarketCap(v) {
+      if (!v && v !== 0) return '--';
+      const n = Number(v);
+      if (n >= 1e12) return (n / 1e12).toFixed(2) + '兆';
+      if (n >= 1e8) return (n / 1e8).toFixed(1) + '億';
+      return n.toLocaleString('ja-JP');
+    }
+    function flashPrice(el, direction) {
+      el.classList.remove('flash-up', 'flash-down');
+      void el.offsetWidth; // reflow でアニメーションを再トリガー
+      el.classList.add(direction === 'up' ? 'flash-up' : 'flash-down');
+    }
+
+    function runSearch() {
+      const query = queryInput.value.trim();
+      if (!query) { queryInput.focus(); return; }
+
+      if (currentEventSource) currentEventSource.close();
+      currentQuery = query;
+      lastBannerPrice = null;
+
+      scanFlash.classList.remove('run'); void scanFlash.offsetWidth; scanFlash.classList.add('run');
+
+      resultsPanel.innerHTML = '';
+      logStream.innerHTML = '';
+      totalHits = 0;
+      newsFeedItems = [];
+      newsFeedCard = null;
+      newsFeedCollapsed = false;
+      tweetFeedItems = [];
+      tweetFeedCard = null;
+      tweetFeedCollapsed = false;
+      chartLoadedForQuery = null;
+      linkState.textContent = 'CONNECTING';
+      linkState.style.color = 'var(--neon-purple)';
+      progressState.textContent = 'ARTICLES FOUND: 0';
+      searchBtn.textContent = 'MONITORING...';
+      searchBtn.style.color = 'var(--neon-green)';
+
+      pushLog(`Starting monitor for: "${query}"`, true);
+
+      const es = new EventSource(`/search-stream?q=${encodeURIComponent(query)}`);
+      currentEventSource = es;
+
+      document.getElementById('stockBanner').style.display = 'none';
+      document.getElementById('stockDetailRow').style.display = 'none';
+      document.getElementById('chartPanel').style.display = 'none';
+
+      es.addEventListener('stock', (e) => {
+        const data = JSON.parse(e.data);
+        if (data.status === 'ok') {
+          document.getElementById('stockBanner').style.display = 'flex';
+          document.getElementById('stockName').textContent = data.name;
+          document.getElementById('stockCode').textContent = data.code;
+          const priceEl = document.getElementById('stockPrice');
+          priceEl.textContent = data.price;
+
+          // ティック更新のたびに一瞬フラッシュさせ、リアルタイム感を演出する
+          if (typeof data.raw_price === 'number') {
+            if (lastBannerPrice !== null && data.raw_price > lastBannerPrice) flashPrice(priceEl, 'up');
+            else if (lastBannerPrice !== null && data.raw_price < lastBannerPrice) flashPrice(priceEl, 'down');
+            lastBannerPrice = data.raw_price;
+          }
+
+          const changeEl = document.getElementById('stockChange');
+          const pctEl = document.getElementById('stockChangePct');
+          changeEl.textContent = data.change || '';
+          pctEl.textContent = data.change_pct || '';
+
+          let cls = 'flat';
+          if (data.raw_change > 0) cls = 'up';
+          else if (data.raw_change < 0) cls = 'down';
+          changeEl.className = cls;
+          pctEl.className = cls;
+
+          // 銘柄チャートパネルはクエリごとに一度だけ自動ロードする（以降は足の切り替えボタンで再取得）
+          if (chartLoadedForQuery !== query) {
+            chartLoadedForQuery = query;
+            document.getElementById('chartPanel').style.display = 'block';
+            loadChart(query, currentChartInterval);
+          }
+
+          // ウォッチリストに既にあれば同期させる
+          if (watchlist.has(query)) {
+            applyQuoteToEntry(watchlist.get(query), data);
+            renderWatchlist();
+            renderTicker();
+          }
+        }
+      });
+
+      es.addEventListener('stock_detail', (e) => {
+        const d = JSON.parse(e.data);
+        if (d.status !== 'ok') return;
+        const row = document.getElementById('stockDetailRow');
+        row.style.display = 'flex';
+        document.getElementById('dtOpen').textContent = fmtPrice(d.open);
+        document.getElementById('dtHigh').textContent = fmtPrice(d.day_high);
+        document.getElementById('dtLow').textContent = fmtPrice(d.day_low);
+        document.getElementById('dtPrevClose').textContent = fmtPrice(d.prev_close);
+        document.getElementById('dtVolume').textContent = fmtVolume(d.volume);
+        document.getElementById('dtYearRange').textContent = `${fmtPrice(d.year_low)} ～ ${fmtPrice(d.year_high)}`;
+        document.getElementById('dtMarketCap').textContent = fmtMarketCap(d.market_cap);
+      });
+
+      es.addEventListener('market_status', (e) => {
+        const data = JSON.parse(e.data);
+        marketStatusEl.textContent = `MARKET: ${data.status}`;
+      });
+
+      es.addEventListener('heartbeat', () => { });
+
+      es.addEventListener('start', () => {
+        linkState.textContent = 'LINK ESTABLISHED - LIVE PUSH ACTIVE';
+        linkState.style.color = 'var(--neon-green)';
+        if (emptyState) emptyState.style.display = 'none';
+      });
+
+      es.addEventListener('log', (e) => {
+        const data = JSON.parse(e.data);
+        pushLog(data.message, /Found|新着/.test(data.message));
+      });
+
+      es.addEventListener('result', (e) => {
+        const data = JSON.parse(e.data);
+        if (data.status === 'empty' || !data.items || data.items.length === 0) return;
+
+        totalHits += (data.total_items || 0);
+        progressState.textContent = `ARTICLES FOUND: ${totalHits}`;
+
+        mergeNewsItems(data.items);
+        renderNewsFeed(data.fetched_at);
+      });
+
+      es.addEventListener('tweet', (e) => {
+        const data = JSON.parse(e.data);
+        if (data.status === 'unavailable') {
+          if (!tweetUnavailableNoted) {
+            pushLog(`X(旧Twitter)検索: ${data.summary || 'APIキーが未設定のため無効化されています'}`);
+            tweetUnavailableNoted = true;
+          }
+          return;
+        }
+        if (data.status === 'error') {
+          pushLog(`X(旧Twitter)検索エラー: ${data.summary || ''}`);
+          return;
+        }
+        if (data.status === 'empty' || !data.items || data.items.length === 0) return;
+
+        totalHits += (data.total_items || 0);
+        progressState.textContent = `ARTICLES FOUND: ${totalHits}`;
+
+        mergeTweetItems(data.items);
+        renderTweetFeed(data.fetched_at);
+      });
+
+      es.addEventListener('error', (e) => {
+        let detail = 'connection closed';
+        if (e && e.data) { try { detail = JSON.parse(e.data).message || detail; } catch (_) { } }
+        pushLog(`Stream error: ${detail}`, false);
+        linkState.textContent = 'ERROR / RECONNECTING';
+        linkState.style.color = 'var(--neon-red)';
+        searchBtn.textContent = 'START MONITORING ▷';
+        searchBtn.style.color = 'var(--neon-purple)';
+        es.close();
+      });
+    }
+    searchBtn.addEventListener('click', runSearch);
+
+    /* =========================================================
+       ウォッチリスト（複数銘柄の同時定点観測 + スパークライン）
+       ========================================================= */
+
+    /* ---- 銘柄ティックの共有購読マネージャー ----
+       ウォッチリスト・ポートフォリオ・価格アラートが同じ銘柄を見ることも多いため、
+       銘柄(query)ごとにEventSourceを1本だけ張り、複数の購読者(callback)へ配信する。
+       参照者が0になった時点で自動的に接続をクローズする。 */
+    const quoteSubscriptions = new Map(); // query -> { es, callbacks: Set<fn> }
+
+    function subscribeQuote(query, callback) {
+      let sub = quoteSubscriptions.get(query);
+      if (!sub) {
+        const es = new EventSource(`/search-stream?q=${encodeURIComponent(query)}`);
+        sub = { es, callbacks: new Set() };
+        es.addEventListener('stock', (e) => {
+          const data = JSON.parse(e.data);
+          if (data.status !== 'ok') return;
+          sub.callbacks.forEach(cb => {
+            try { cb(data); } catch (err) { console.error('quote callback error', err); }
+          });
+        });
+        quoteSubscriptions.set(query, sub);
+      }
+      sub.callbacks.add(callback);
+      return function unsubscribe() {
+        sub.callbacks.delete(callback);
+        if (sub.callbacks.size === 0) {
+          sub.es.close();
+          quoteSubscriptions.delete(query);
+        }
+      };
+    }
+
+    /* ---- localStorage 永続化ヘルパー ---- */
+    const STORAGE_KEYS = {
+      watchlist: 'terminal_watchlist_v1',
+      portfolio: 'terminal_portfolio_v1',
+      alerts: 'terminal_alerts_v1',
+    };
+
+    function saveToStorage(key, value) {
+      try { localStorage.setItem(key, JSON.stringify(value)); }
+      catch (err) { console.warn('localStorage 保存に失敗しました', err); }
+    }
+    function loadFromStorage(key, fallback) {
+      try {
+        const raw = localStorage.getItem(key);
+        return raw ? JSON.parse(raw) : fallback;
+      } catch (err) {
+        console.warn('localStorage 読み込みに失敗しました', err);
+        return fallback;
+      }
+    }
+
+    const watchlist = new Map(); // key: query -> entry
+
+    function applyQuoteToEntry(entry, data) {
+      entry.name = data.name || entry.name;
+      entry.code = data.code || entry.code;
+      entry.price = data.price;
+      entry.change = data.change;
+      entry.changePct = data.change_pct;
+      entry.rawChange = data.raw_change ?? 0;
+      const numeric = data.raw_price ?? parseFloat(String(data.price).replace(/,/g, ''));
+      const prevPrice = entry.history.length ? entry.history[entry.history.length - 1] : null;
+      if (!Number.isNaN(numeric)) {
+        entry.flashDir = prevPrice === null ? null : (numeric > prevPrice ? 'up' : (numeric < prevPrice ? 'down' : null));
+        entry.history.push(numeric);
+        if (entry.history.length > 150) entry.history.shift();
+      }
+    }
+
+    function persistWatchlist() {
+      saveToStorage(STORAGE_KEYS.watchlist, Array.from(watchlist.keys()));
+    }
+
+    async function addToWatchlist(rawQuery, opts = {}) {
+      const query = (rawQuery || '').trim();
+      if (!query || watchlist.has(query)) return;
+
+      const entry = {
+        query, name: query, code: '', price: '--', change: '', changePct: '',
+        rawChange: 0, history: [], unsubscribe: null,
+      };
+      watchlist.set(query, entry);
+      renderWatchlist();
+      if (!opts.silent) pushLog(`ウォッチリストに追加: "${query}"`, true);
+      if (!opts.skipPersist) persistWatchlist();
+
+      // 初期スパークライン用に当日の値動きを一括取得
+      try {
+        const res = await fetch(`/api/history?q=${encodeURIComponent(query)}`);
+        const data = await res.json();
+        if (data.status === 'ok' && Array.isArray(data.points)) {
+          entry.history = data.points.map(p => p.p);
+          entry.code = data.code || entry.code;
+          renderWatchlist();
+        }
+      } catch (err) {
+        console.error('history fetch failed', err);
+      }
+
+      // 即時の現在値も取得（history が空/古い場合の保険）
+      try {
+        const res = await fetch(`/api/quote?q=${encodeURIComponent(query)}`);
+        const data = await res.json();
+        if (data.status === 'ok') {
+          applyQuoteToEntry(entry, data);
+          renderWatchlist();
+          renderTicker();
+        }
+      } catch (err) {
+        console.error('quote fetch failed', err);
+      }
+
+      // 以後はリアルタイム更新を購読（共有マネージャー経由）
+      entry.unsubscribe = subscribeQuote(query, (data) => {
+        applyQuoteToEntry(entry, data);
+        renderWatchlist();
+        renderTicker();
+        checkAlertsForQuery(query, data);
+      });
+    }
+
+    function removeFromWatchlist(query) {
+      const entry = watchlist.get(query);
+      if (entry && entry.unsubscribe) entry.unsubscribe();
+      watchlist.delete(query);
+      renderWatchlist();
+      renderTicker();
+      persistWatchlist();
+      pushLog(`ウォッチリストから削除: "${query}"`);
+    }
+
+    function drawSparkline(canvasEl, values, color) {
+      const dctx = canvasEl.getContext('2d');
+      const w = canvasEl.width, h = canvasEl.height;
+      dctx.clearRect(0, 0, w, h);
+      if (!values || values.length < 2) return;
+      const min = Math.min(...values), max = Math.max(...values);
+      const range = (max - min) || 1;
+      dctx.beginPath();
+      values.forEach((v, i) => {
+        const x = (i / (values.length - 1)) * w;
+        const y = h - ((v - min) / range) * (h - 4) - 2;
+        i === 0 ? dctx.moveTo(x, y) : dctx.lineTo(x, y);
+      });
+      dctx.strokeStyle = color;
+      dctx.lineWidth = 1.4;
+      dctx.stroke();
+    }
+
+    function renderWatchlist() {
+      if (watchlist.size === 0) {
+        watchlistBody.innerHTML = '<div class="watch-empty">まだ銘柄が登録されていません。<br>検索欄に銘柄名を入力し「＋ WATCH」で追加できます。</div>';
+        return;
+      }
+
+      const empty = watchlistBody.querySelector('.watch-empty');
+      if (empty) empty.remove();
+
+      Array.from(watchlistBody.children).forEach(child => {
+        if (child.dataset.q && !watchlist.has(child.dataset.q)) {
+          child.remove();
+        }
+      });
+
+      for (const entry of watchlist.values()) {
+        let row = Array.from(watchlistBody.children).find(c => c.dataset.q === entry.query);
+        let trendCls = 'flat', trendColor = '#8a8168';
+        if (entry.rawChange > 0) { trendCls = 'up'; trendColor = '#00e676'; }
+        else if (entry.rawChange < 0) { trendCls = 'down'; trendColor = '#ff3b30'; }
+
+        if (!row) {
+          row = document.createElement('div');
+          row.dataset.q = entry.query;
+          row.className = 'watch-row';
+          row.innerHTML = `
+            <div class="watch-info">
+              <div class="watch-name"></div>
+              <div class="watch-code"></div>
+            </div>
+            <canvas class="watch-spark" width="46" height="24"></canvas>
+            <div class="watch-figures">
+              <div class="watch-price"></div>
+              <div class="watch-pct"></div>
+            </div>
+            <span class="watch-remove" title="削除">✕</span>
+          `;
+          row.addEventListener('click', (e) => {
+            if (e.target.classList.contains('watch-remove')) return;
+            queryInput.value = entry.query;
+            runSearch();
+          });
+          row.querySelector('.watch-remove').addEventListener('click', (e) => {
+            e.stopPropagation();
+            removeFromWatchlist(entry.query);
+          });
+          watchlistBody.appendChild(row);
+        }
+
+        row.className = 'watch-row' + (entry.query === currentQuery ? ' active' : '');
+        row.querySelector('.watch-name').textContent = entry.name;
+        row.querySelector('.watch-code').textContent = entry.code || entry.query;
+
+        const priceEl = row.querySelector('.watch-price');
+        priceEl.textContent = entry.price;
+        priceEl.className = 'watch-price ' + (entry.flashDir === 'up' ? 'flash-up' : entry.flashDir === 'down' ? 'flash-down' : '');
+
+        const pctEl = row.querySelector('.watch-pct');
+        pctEl.textContent = entry.changePct || '--';
+        pctEl.className = 'watch-pct ' + trendCls;
+
+        drawSparkline(row.querySelector('.watch-spark'), entry.history, trendColor);
+      }
+    }
+
+    function renderTicker() {
+      if (watchlist.size === 0) {
+        tickerTape.classList.add('empty');
+        tickerTrack.innerHTML = '';
+        return;
+      }
+      tickerTape.classList.remove('empty');
+
+      const entries = Array.from(watchlist.values());
+      const needsRebuild = tickerTrack.children.length !== entries.length * 2;
+
+      if (needsRebuild) {
+        const itemsHtml = entries.map(entry => {
+          let cls = 'flat';
+          if (entry.rawChange > 0) cls = 'up';
+          else if (entry.rawChange < 0) cls = 'down';
+          const arrow = entry.rawChange > 0 ? '▲' : (entry.rawChange < 0 ? '▼' : '―');
+          return `<span class="ticker-item"><span class="tn">${escapeHtml(entry.code || entry.query)}</span>
+      <span class="tp ${cls}">${escapeHtml(entry.price)}</span>
+      <span class="tc ${cls}">${arrow} ${escapeHtml(entry.changePct || '')}</span></span>`;
+        }).join('');
+        tickerTrack.innerHTML = itemsHtml + itemsHtml;
+        const duration = Math.max(15, watchlist.size * 6);
+        tickerTrack.style.animationDuration = duration + 's';
+      } else {
+        const nodes = Array.from(tickerTrack.children);
+        for (let i = 0; i < entries.length; i++) {
+          const entry = entries[i];
+          let cls = 'flat';
+          if (entry.rawChange > 0) cls = 'up';
+          else if (entry.rawChange < 0) cls = 'down';
+          const arrow = entry.rawChange > 0 ? '▲' : (entry.rawChange < 0 ? '▼' : '―');
+
+          [nodes[i], nodes[i + entries.length]].forEach(node => {
+            node.querySelector('.tn').textContent = entry.code || entry.query;
+            const tp = node.querySelector('.tp');
+            tp.textContent = entry.price;
+            tp.className = 'tp ' + cls;
+            const tc = node.querySelector('.tc');
+            tc.textContent = arrow + ' ' + (entry.changePct || '');
+            tc.className = 'tc ' + cls;
+          });
+        }
+      }
+    }
+
+    watchBtn.addEventListener('click', () => addToWatchlist(queryInput.value));
+    bannerAddBtn.addEventListener('click', () => {
+      const code = document.getElementById('stockCode').textContent;
+      addToWatchlist(currentQuery || code);
+    });
+
+    /* =========================================================
+       ポートフォリオ（保有株の評価損益をリアルタイム計算）
+       ========================================================= */
+    const portfolio = new Map(); // key: query -> holding
+
+    function persistPortfolio() {
+      const arr = Array.from(portfolio.values()).map(h => ({ query: h.query, qty: h.qty, avgCost: h.avgCost }));
+      saveToStorage(STORAGE_KEYS.portfolio, arr);
+    }
+
+    async function addHolding(rawQuery, qty, avgCost, opts = {}) {
+      const query = (rawQuery || '').trim();
+      if (!query || !(qty > 0) || !(avgCost >= 0) || portfolio.has(query)) return;
+
+      const holding = {
+        query, name: query, code: '', qty, avgCost,
+        price: null, rawPrice: null, unsubscribe: null,
+      };
+      portfolio.set(query, holding);
+      renderPortfolio();
+      if (!opts.skipPersist) persistPortfolio();
+
+      try {
+        const res = await fetch(`/api/quote?q=${encodeURIComponent(query)}`);
+        const data = await res.json();
+        if (data.status === 'ok') {
+          holding.name = data.name || holding.name;
+          holding.code = data.code || holding.code;
+          holding.price = data.price;
+          holding.rawPrice = data.raw_price;
+          renderPortfolio();
+        }
+      } catch (err) {
+        console.error('portfolio initial quote failed', err);
+      }
+
+      holding.unsubscribe = subscribeQuote(query, (data) => {
+        holding.name = data.name || holding.name;
+        holding.code = data.code || holding.code;
+        holding.price = data.price;
+        holding.rawPrice = data.raw_price;
+        renderPortfolio();
+        checkAlertsForQuery(query, data);
+      });
+    }
+
+    function removeHolding(query) {
+      const h = portfolio.get(query);
+      if (h && h.unsubscribe) h.unsubscribe();
+      portfolio.delete(query);
+      renderPortfolio();
+      persistPortfolio();
+    }
+
+    function renderPortfolio() {
+      const tbody = document.getElementById('pfTableBody');
+      const summaryEl = document.getElementById('pfSummary');
+
+      if (portfolio.size === 0) {
+        tbody.innerHTML = `<tr><td colspan="8" class="m-empty">保有銘柄が登録されていません</td></tr>`;
+        summaryEl.innerHTML = '';
+        return;
+      }
+
+      let totalValue = 0, totalCost = 0, allPriced = true;
+      const rows = Array.from(portfolio.values()).map(h => {
+        const hasPrice = typeof h.rawPrice === 'number';
+        if (!hasPrice) allPriced = false;
+        const value = hasPrice ? h.rawPrice * h.qty : null;
+        const cost = h.avgCost * h.qty;
+        const pnl = hasPrice ? value - cost : null;
+        const pnlPct = (hasPrice && cost > 0) ? (pnl / cost) * 100 : null;
+        if (hasPrice) { totalValue += value; totalCost += cost; }
+
+        const cls = pnl == null ? 'flat' : (pnl > 0 ? 'up' : (pnl < 0 ? 'down' : 'flat'));
+        return `
+      <tr>
+        <td><span class="mname">${escapeHtml(h.name)}</span><span class="mcode">${escapeHtml(h.code || h.query)}</span></td>
+        <td>${h.qty.toLocaleString('ja-JP')}</td>
+        <td>${fmtPrice(h.avgCost)}</td>
+        <td>${h.price != null ? escapeHtml(h.price) : '--'}</td>
+        <td>${value != null ? fmtPrice(value) : '--'}</td>
+        <td class="${cls}">${pnl != null ? (pnl > 0 ? '+' : '') + fmtPrice(pnl) : '--'}</td>
+        <td class="${cls}">${pnlPct != null ? (pnlPct > 0 ? '+' : '') + pnlPct.toFixed(2) + '%' : '--'}</td>
+        <td><button class="mdel" data-remove-holding="${escapeHtml(h.query)}">削除</button></td>
+      </tr>`;
+      }).join('');
+      tbody.innerHTML = rows;
+
+      tbody.querySelectorAll('[data-remove-holding]').forEach(btn => {
+        btn.addEventListener('click', () => removeHolding(btn.dataset.removeHolding));
+      });
+
+      const totalPnl = totalValue - totalCost;
+      const totalPnlPct = totalCost > 0 ? (totalPnl / totalCost) * 100 : 0;
+      const totalCls = totalPnl > 0 ? 'up' : (totalPnl < 0 ? 'down' : 'flat');
+      summaryEl.innerHTML = `
+    <div class="ps-item"><span class="ps-label">評価額合計${allPriced ? '' : '（一部未取得）'}</span><span class="ps-value">${fmtPrice(totalValue)}</span></div>
+    <div class="ps-item"><span class="ps-label">取得額合計</span><span class="ps-value">${fmtPrice(totalCost)}</span></div>
+    <div class="ps-item"><span class="ps-label">評価損益</span><span class="ps-value ${totalCls}">${totalPnl > 0 ? '+' : ''}${fmtPrice(totalPnl)}</span></div>
+    <div class="ps-item"><span class="ps-label">損益率</span><span class="ps-value ${totalCls}">${totalPnl > 0 ? '+' : ''}${totalPnlPct.toFixed(2)}%</span></div>
+  `;
+    }
+
+    document.getElementById('pfAddBtn').addEventListener('click', () => {
+      const query = document.getElementById('pfQuery').value.trim();
+      const qty = parseFloat(document.getElementById('pfQty').value);
+      const avgCost = parseFloat(document.getElementById('pfAvgCost').value);
+      if (!query || !(qty > 0) || Number.isNaN(avgCost) || avgCost < 0) {
+        alert('銘柄名・数量・取得単価を正しく入力してください');
+        return;
+      }
+      addHolding(query, qty, avgCost);
+      document.getElementById('pfQuery').value = '';
+      document.getElementById('pfQty').value = '';
+      document.getElementById('pfAvgCost').value = '';
+    });
+
+    /* =========================================================
+       価格アラート（ブラウザ通知 + 音）
+       ========================================================= */
+    const priceAlerts = new Map(); // key: id -> alert
+    const alertQuerySubs = new Map(); // key: query -> unsubscribe（アラート専用の購読。他機能と共有される場合はそちらのcallbackで足りるため二重購読は避ける）
+    let alertIdSeq = 1;
+
+    function persistAlerts() {
+      const arr = Array.from(priceAlerts.values()).map(a => ({
+        id: a.id, query: a.query, name: a.name, code: a.code,
+        condition: a.condition, targetPrice: a.targetPrice, fired: a.fired,
+      }));
+      saveToStorage(STORAGE_KEYS.alerts, arr);
+    }
+
+    function ensureAlertSubscription(query) {
+      if (alertQuerySubs.has(query)) return;
+      const unsubscribe = subscribeQuote(query, (data) => checkAlertsForQuery(query, data));
+      alertQuerySubs.set(query, unsubscribe);
+    }
+
+    function releaseAlertSubscriptionIfUnused(query) {
+      const stillNeeded = Array.from(priceAlerts.values()).some(a => a.query === query && !a.fired);
+      if (!stillNeeded && alertQuerySubs.has(query)) {
+        alertQuerySubs.get(query)();
+        alertQuerySubs.delete(query);
+      }
+    }
+
+    function playAlertSound() {
+      try {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        const ctx = new AudioCtx();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'square';
+        osc.frequency.value = 880;
+        gain.gain.value = 0.15;
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+        setTimeout(() => { osc.stop(); ctx.close(); }, 220);
+      } catch (err) {
+        console.warn('アラート音の再生に失敗しました', err);
+      }
+    }
+
+    function fireAlert(alertItem, data) {
+      alertItem.fired = true;
+      persistAlerts();
+      renderAlerts();
+      releaseAlertSubscriptionIfUnused(alertItem.query);
+
+      const condLabel = alertItem.condition === 'above' ? '以上' : '以下';
+      const message = `${alertItem.name} が ${fmtPrice(alertItem.targetPrice)} ${condLabel}になりました（現在値: ${data.price}）`;
+      pushLog(`🔔 ALERT: ${message}`, true);
+      playAlertSound();
+
+      if (window.Notification && Notification.permission === 'granted') {
+        try { new Notification('価格アラート', { body: message }); } catch (err) { console.warn(err); }
+      }
+    }
+
+    function checkAlertsForQuery(query, data) {
+      const rawPrice = data.raw_price;
+      if (typeof rawPrice !== 'number') return;
+      priceAlerts.forEach(a => {
+        if (a.query !== query || a.fired) return;
+        if (a.condition === 'above' && rawPrice >= a.targetPrice) fireAlert(a, data);
+        else if (a.condition === 'below' && rawPrice <= a.targetPrice) fireAlert(a, data);
+      });
+    }
+
+    async function addAlert(rawQuery, condition, targetPrice, opts = {}) {
+      const query = (rawQuery || '').trim();
+      if (!query || !(targetPrice >= 0)) return;
+
+      if (window.Notification && Notification.permission === 'default' && !opts.silent) {
+        try { await Notification.requestPermission(); } catch (err) { /* noop */ }
+      }
+
+      const alertItem = {
+        id: opts.id || alertIdSeq++,
+        query, name: query, code: '', condition, targetPrice, fired: !!opts.fired,
+      };
+      priceAlerts.set(alertItem.id, alertItem);
+      renderAlerts();
+      if (!opts.skipPersist) persistAlerts();
+
+      try {
+        const res = await fetch(`/api/quote?q=${encodeURIComponent(query)}`);
+        const data = await res.json();
+        if (data.status === 'ok') {
+          alertItem.name = data.name || alertItem.name;
+          alertItem.code = data.code || alertItem.code;
+          renderAlerts();
+          if (!alertItem.fired) checkAlertsForQuery(query, data);
+        }
+      } catch (err) {
+        console.error('alert initial quote failed', err);
+      }
+
+      if (!alertItem.fired) ensureAlertSubscription(query);
+    }
+
+    function removeAlert(id) {
+      const a = priceAlerts.get(id);
+      if (!a) return;
+      priceAlerts.delete(id);
+      persistAlerts();
+      renderAlerts();
+      if (a.query) releaseAlertSubscriptionIfUnused(a.query);
+    }
+
+    function renderAlerts() {
+      const tbody = document.getElementById('alTableBody');
+      if (priceAlerts.size === 0) {
+        tbody.innerHTML = `<tr><td colspan="4" class="m-empty">登録中のアラートはありません</td></tr>`;
+        return;
+      }
+      const rows = Array.from(priceAlerts.values()).map(a => `
+    <tr class="${a.fired ? 'alert-fired' : ''}">
+      <td><span class="mname">${escapeHtml(a.name)}</span><span class="mcode">${escapeHtml(a.code || a.query)}</span></td>
+      <td>${a.condition === 'above' ? '≥' : '≤'} ${fmtPrice(a.targetPrice)}</td>
+      <td>${a.fired ? '発火済み' : '監視中'}</td>
+      <td><button class="mdel" data-remove-alert="${a.id}">削除</button></td>
+    </tr>`).join('');
+      tbody.innerHTML = rows;
+      tbody.querySelectorAll('[data-remove-alert]').forEach(btn => {
+        btn.addEventListener('click', () => removeAlert(Number(btn.dataset.removeAlert)));
+      });
+    }
+
+    document.getElementById('alAddBtn').addEventListener('click', () => {
+      const query = document.getElementById('alQuery').value.trim();
+      const condition = document.getElementById('alCondition').value;
+      const targetPrice = parseFloat(document.getElementById('alPrice').value);
+      if (!query || Number.isNaN(targetPrice) || targetPrice < 0) {
+        alert('銘柄名・価格を正しく入力してください');
+        return;
+      }
+      addAlert(query, condition, targetPrice);
+      document.getElementById('alQuery').value = '';
+      document.getElementById('alPrice').value = '';
+    });
+
+    /* =========================================================
+       銘柄チャートパネル（1分足〜月足 + ズーム/横移動 + 出来高）
+       ========================================================= */
+    const CHART_PADDING = { top: 14, bottom: 18, left: 6, right: 56 };
+    const VOLUME_PADDING = { top: 6, bottom: 16, left: 6, right: 56 };
+    const CHART_MIN_VISIBLE = 5; // これ以上はズームインできない最小本数
+
+    let chartFullPoints = null;   // 現在の足で取得した全期間データ
+    let chartRange = null;        // {start, end} 表示中の範囲（chartFullPoints への実数インデックス）
+    let chartIndicatorData = null; // 全期間に対して計算済みの指標（表示範囲でスライスして使う）
+    const chartIndicators = { sma5: false, sma25: false, sma75: false, bb: false };
+
+    /* ---- テクニカル指標の計算 ---- */
+    function computeSMA(values, period) {
+      const out = new Array(values.length).fill(null);
+      let sum = 0;
+      for (let i = 0; i < values.length; i++) {
+        sum += values[i];
+        if (i >= period) sum -= values[i - period];
+        if (i >= period - 1) out[i] = sum / period;
+      }
+      return out;
+    }
+
+    function computeBollingerBands(values, period = 20, mult = 2) {
+      const mid = computeSMA(values, period);
+      const upper = new Array(values.length).fill(null);
+      const lower = new Array(values.length).fill(null);
+      for (let i = 0; i < values.length; i++) {
+        if (mid[i] == null) continue;
+        let sumSq = 0;
+        for (let j = i - period + 1; j <= i; j++) {
+          const d = values[j] - mid[i];
+          sumSq += d * d;
+        }
+        const std = Math.sqrt(sumSq / period);
+        upper[i] = mid[i] + mult * std;
+        lower[i] = mid[i] - mult * std;
+      }
+      return { upper, lower, mid };
+    }
+
+    function recomputeIndicators() {
+      if (!chartFullPoints || chartFullPoints.length === 0) { chartIndicatorData = null; return; }
+      const closes = chartFullPoints.map(p => p.p);
+      chartIndicatorData = {
+        sma5: computeSMA(closes, 5),
+        sma25: computeSMA(closes, 25),
+        sma75: computeSMA(closes, 75),
+        bb: computeBollingerBands(closes, 20, 2),
+      };
+    }
+
+    function sliceIndicators(s, e) {
+      if (!chartIndicatorData) return null;
+      const slice = (arr) => arr.slice(s, e + 1);
+      return {
+        sma5: slice(chartIndicatorData.sma5),
+        sma25: slice(chartIndicatorData.sma25),
+        sma75: slice(chartIndicatorData.sma75),
+        bb: {
+          upper: slice(chartIndicatorData.bb.upper),
+          lower: slice(chartIndicatorData.bb.lower),
+          mid: slice(chartIndicatorData.bb.mid),
+        },
+      };
+    }
+
+    document.getElementById('indicatorRow').addEventListener('click', (e) => {
+      const btn = e.target.closest('.indicator-chip');
+      if (!btn) return;
+      const key = btn.dataset.ind;
+      chartIndicators[key] = !chartIndicators[key];
+      btn.classList.toggle('active', chartIndicators[key]);
+      redrawChart();
+    });
+
+    function resizeChartCanvas() {
+      const canvas = document.getElementById('chartCanvas');
+      const wrap = canvas.parentElement;
+      const targetW = Math.max(200, Math.floor(wrap.clientWidth));
+      if (canvas.width !== targetW) canvas.width = targetW;
+      canvas.height = 230;
+    }
+
+    function resizeVolumeCanvas() {
+      const canvas = document.getElementById('volumeCanvas');
+      const wrap = canvas.parentElement;
+      const targetW = Math.max(200, Math.floor(wrap.clientWidth));
+      if (canvas.width !== targetW) canvas.width = targetW;
+      canvas.height = 70;
+    }
+
+    function updateChartIntervalButtons() {
+      document.querySelectorAll('.chart-interval-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.interval === currentChartInterval);
+      });
+    }
+
+    function getVisibleRangeIdx() {
+      if (!chartFullPoints || !chartRange) return null;
+      const s = Math.max(0, Math.round(chartRange.start));
+      const e = Math.min(chartFullPoints.length - 1, Math.round(chartRange.end));
+      if (e < s) return null;
+      return [s, e];
+    }
+
+    function getVisiblePoints() {
+      const range = getVisibleRangeIdx();
+      if (!range) return [];
+      return chartFullPoints.slice(range[0], range[1] + 1);
+    }
+
+    function updateChartStatusText() {
+      const statusEl = document.getElementById('chartStatus');
+      if (!chartFullPoints || !chartRange) { statusEl.textContent = ''; return; }
+      const visible = getVisiblePoints();
+      if (visible.length === 0) { statusEl.textContent = 'データがありません'; return; }
+      const total = chartFullPoints.length;
+      statusEl.textContent =
+        `${visible.length}/${total}本表示 ／ ${visible[0].t} 〜 ${visible[visible.length - 1].t} ／ ホイールでズーム・ドラッグで移動・ダブルクリックで全体表示`;
+    }
+
+    function redrawChart() {
+      if (!chartFullPoints || chartFullPoints.length === 0) return;
+      resizeChartCanvas();
+      resizeVolumeCanvas();
+      const range = getVisibleRangeIdx();
+      const visible = range ? chartFullPoints.slice(range[0], range[1] + 1) : [];
+      const indicators = range ? sliceIndicators(range[0], range[1]) : null;
+      drawCandlestickChart(document.getElementById('chartCanvas'), visible, indicators);
+      drawVolumeChart(document.getElementById('volumeCanvas'), visible);
+      updateChartStatusText();
+    }
+
+    async function loadChart(query, interval) {
+      currentChartQuery = query;
+      currentChartInterval = interval;
+      updateChartIntervalButtons();
+
+      const statusEl = document.getElementById('chartStatus');
+      statusEl.textContent = '読み込み中...';
+
+      try {
+        const res = await fetch(`/api/history?q=${encodeURIComponent(query)}&interval=${encodeURIComponent(interval)}`);
+        const data = await res.json();
+
+        if (currentChartQuery !== query || currentChartInterval !== interval) return;
+
+        const points = (data.status === 'ok' && Array.isArray(data.points))
+          ? data.points.filter(p => p.o != null && p.h != null && p.l != null && p.p != null)
+          : [];
+
+        if (points.length > 0) {
+          chartFullPoints = points;
+          chartRange = { start: 0, end: points.length - 1 };
+          recomputeIndicators();
+          redrawChart();
+        } else {
+          chartFullPoints = null;
+          chartRange = null;
+          chartIndicatorData = null;
+          const canvas = document.getElementById('chartCanvas');
+          canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+          const vcanvas = document.getElementById('volumeCanvas');
+          vcanvas.getContext('2d').clearRect(0, 0, vcanvas.width, vcanvas.height);
+          statusEl.textContent = 'この足のデータは取得できませんでした';
+        }
+      } catch (err) {
+        console.error('chart fetch failed', err);
+        statusEl.textContent = 'チャート取得エラー';
+      }
+    }
+
+    function drawCandlestickChart(canvas, points, indicators) {
+      const dctx = canvas.getContext('2d');
+      const w = canvas.width, h = canvas.height;
+      dctx.clearRect(0, 0, w, h);
+      if (!points || points.length < 1) return;
+
+      const padding = CHART_PADDING;
+      const plotW = w - padding.left - padding.right;
+      const plotH = h - padding.top - padding.bottom;
+
+      const highs = points.map(p => p.h), lows = points.map(p => p.l);
+      let maxP = Math.max(...highs), minP = Math.min(...lows);
+
+      // オーバーレイ表示中の指標が価格レンジの外に出る場合は軸の範囲を広げる
+      if (indicators) {
+        const extra = [];
+        ['sma5', 'sma25', 'sma75'].forEach(k => {
+          if (chartIndicators[k]) extra.push(...indicators[k].filter(v => v != null));
+        });
+        if (chartIndicators.bb) {
+          extra.push(...indicators.bb.upper.filter(v => v != null));
+          extra.push(...indicators.bb.lower.filter(v => v != null));
+        }
+        if (extra.length) {
+          maxP = Math.max(maxP, ...extra);
+          minP = Math.min(minP, ...extra);
+        }
+      }
+
+      const range = (maxP - minP) || (maxP * 0.01) || 1;
+
+      const n = points.length;
+      const slotW = plotW / n;
+      const candleW = Math.max(1, Math.min(14, slotW * 0.62));
+      const yFor = (price) => padding.top + (1 - (price - minP) / range) * plotH;
+
+      // グリッド線（水平3本）
+      dctx.strokeStyle = 'rgba(255,153,0,0.08)';
+      dctx.lineWidth = 1;
+      for (let i = 0; i <= 3; i++) {
+        const y = padding.top + (plotH / 3) * i;
+        dctx.beginPath();
+        dctx.moveTo(padding.left, y);
+        dctx.lineTo(w - padding.right, y);
+        dctx.stroke();
+      }
+
+      // ローソク足
+      points.forEach((p, i) => {
+        const cx = padding.left + slotW * i + slotW / 2;
+        const isUp = p.p >= p.o;
+        const color = isUp ? '#00e676' : '#ff3b30';
+        dctx.strokeStyle = color;
+        dctx.fillStyle = color;
+
+        // ヒゲ（高値〜安値）
+        dctx.beginPath();
+        dctx.moveTo(cx, yFor(p.h));
+        dctx.lineTo(cx, yFor(p.l));
+        dctx.lineWidth = 1;
+        dctx.stroke();
+
+        // 実体（始値〜終値）
+        const yOpen = yFor(p.o), yClose = yFor(p.p);
+        const top = Math.min(yOpen, yClose);
+        const bodyH = Math.max(1, Math.abs(yClose - yOpen));
+        dctx.fillRect(cx - candleW / 2, top, candleW, bodyH);
+      });
+
+      // テクニカル指標のオーバーレイ
+      if (indicators) {
+        const drawLine = (arr, color, lineWidth = 1.3) => {
+          dctx.beginPath();
+          let started = false;
+          arr.forEach((v, i) => {
+            if (v == null) return;
+            const cx = padding.left + slotW * i + slotW / 2;
+            const cy = yFor(v);
+            if (!started) { dctx.moveTo(cx, cy); started = true; }
+            else dctx.lineTo(cx, cy);
+          });
+          if (started) {
+            dctx.strokeStyle = color;
+            dctx.lineWidth = lineWidth;
+            dctx.stroke();
+          }
+        };
+
+        if (chartIndicators.sma5) drawLine(indicators.sma5, '#00c2ff');
+        if (chartIndicators.sma25) drawLine(indicators.sma25, '#ffb84d');
+        if (chartIndicators.sma75) drawLine(indicators.sma75, '#eae6da');
+        if (chartIndicators.bb) {
+          drawLine(indicators.bb.upper, 'rgba(199,146,255,0.8)', 1);
+          drawLine(indicators.bb.lower, 'rgba(199,146,255,0.8)', 1);
+        }
+      }
+
+      // 右側に価格軸ラベル（高値・中央値・安値）
+      dctx.fillStyle = 'rgba(234,230,218,0.65)';
+      dctx.font = '10px Consolas, monospace';
+      dctx.textAlign = 'left';
+      const midP = (maxP + minP) / 2;
+      [[maxP, padding.top], [midP, padding.top + plotH / 2], [minP, padding.top + plotH]].forEach(([price, y]) => {
+        dctx.fillText(fmtPrice(price), w - padding.right + 6, y + 3);
+      });
+
+      // 左端・右端の日時ラベル
+      dctx.fillStyle = 'rgba(234,230,218,0.5)';
+      dctx.textAlign = 'left';
+      dctx.fillText(points[0].t, padding.left, h - 4);
+      dctx.textAlign = 'right';
+      dctx.fillText(points[points.length - 1].t, w - padding.right, h - 4);
+    }
+
+    function drawVolumeChart(canvas, points) {
+      const dctx = canvas.getContext('2d');
+      const w = canvas.width, h = canvas.height;
+      dctx.clearRect(0, 0, w, h);
+      if (!points || points.length < 1) return;
+
+      const padding = VOLUME_PADDING;
+      const plotW = w - padding.left - padding.right;
+      const plotH = h - padding.top - padding.bottom;
+      const n = points.length;
+      const slotW = plotW / n;
+      const barW = Math.max(1, Math.min(14, slotW * 0.62));
+
+      const vols = points.map(p => p.v || 0);
+      const maxV = Math.max(...vols, 1);
+
+      points.forEach((p, i) => {
+        const cx = padding.left + slotW * i + slotW / 2;
+        const vh = Math.max(1, ((p.v || 0) / maxV) * plotH);
+        const isUp = p.p >= p.o;
+        dctx.fillStyle = isUp ? 'rgba(0,230,118,0.55)' : 'rgba(255,59,48,0.55)';
+        dctx.fillRect(cx - barW / 2, padding.top + plotH - vh, barW, vh);
+      });
+
+      dctx.fillStyle = 'rgba(234,230,218,0.55)';
+      dctx.font = '9px Consolas, monospace';
+      dctx.textAlign = 'left';
+      dctx.fillText('VOL MAX ' + fmtVolume(maxV), padding.left, padding.top + 8);
+    }
+
+    /* ---- ズーム & 横移動の操作系（マウスホイール／ドラッグ／タッチ） ---- */
+    function chartPlotWidth(cssWidth) {
+      return cssWidth - CHART_PADDING.left - CHART_PADDING.right;
+    }
+
+    function zoomChart(factor, pixelX, cssWidth) {
+      if (!chartFullPoints || !chartRange) return;
+      const plotW = chartPlotWidth(cssWidth);
+      const ratio = Math.min(1, Math.max(0, (pixelX - CHART_PADDING.left) / plotW));
+      const curLen = chartRange.end - chartRange.start;
+      const anchor = chartRange.start + ratio * curLen;
+
+      const maxLen = chartFullPoints.length - 1;
+      let newLen = curLen * factor;
+      newLen = Math.min(maxLen, Math.max(CHART_MIN_VISIBLE - 1, newLen));
+
+      let newStart = anchor - ratio * newLen;
+      let newEnd = newStart + newLen;
+      if (newStart < 0) { newEnd -= newStart; newStart = 0; }
+      if (newEnd > maxLen) { newStart -= (newEnd - maxLen); newEnd = maxLen; }
+      newStart = Math.max(0, newStart);
+
+      chartRange = { start: newStart, end: newEnd };
+      redrawChart();
+    }
+
+    function panChartByPixels(dxPixels, cssWidth, baseRange) {
+      if (!chartFullPoints || !baseRange) return;
+      const plotW = chartPlotWidth(cssWidth);
+      const curLen = baseRange.end - baseRange.start;
+      const idxDelta = -(dxPixels / plotW) * curLen; // 右へドラッグ = 過去方向へ移動
+
+      const maxLen = chartFullPoints.length - 1;
+      let newStart = baseRange.start + idxDelta;
+      let newEnd = baseRange.end + idxDelta;
+      if (newStart < 0) { newEnd -= newStart; newStart = 0; }
+      if (newEnd > maxLen) { newStart -= (newEnd - maxLen); newEnd = maxLen; }
+      newStart = Math.max(0, newStart);
+
+      chartRange = { start: newStart, end: newEnd };
+      redrawChart();
+    }
+
+    function resetChartZoom() {
+      if (!chartFullPoints) return;
+      chartRange = { start: 0, end: chartFullPoints.length - 1 };
+      redrawChart();
+    }
+
+    function touchDistance(touches) {
+      const dx = touches[0].clientX - touches[1].clientX;
+      const dy = touches[0].clientY - touches[1].clientY;
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    function attachChartInteractions() {
+      const canvas = document.getElementById('chartCanvas');
+      canvas.style.cursor = 'grab';
+      canvas.style.touchAction = 'none';
+
+      let isDragging = false;
+      let dragStartX = 0;
+      let dragBaseRange = null;
+
+      canvas.addEventListener('wheel', (e) => {
+        if (!chartFullPoints) return;
+        e.preventDefault();
+        const rect = canvas.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        zoomChart(e.deltaY < 0 ? 0.85 : 1 / 0.85, mouseX, rect.width);
+      }, { passive: false });
+
+      canvas.addEventListener('mousedown', (e) => {
+        if (!chartFullPoints) return;
+        isDragging = true;
+        dragStartX = e.clientX;
+        dragBaseRange = { ...chartRange };
+        canvas.style.cursor = 'grabbing';
+      });
+      window.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        const rect = canvas.getBoundingClientRect();
+        panChartByPixels(e.clientX - dragStartX, rect.width, dragBaseRange);
+      });
+      window.addEventListener('mouseup', () => {
+        if (!isDragging) return;
+        isDragging = false;
+        canvas.style.cursor = 'grab';
+      });
+
+      canvas.addEventListener('dblclick', () => resetChartZoom());
+
+      // タッチ操作: 1本指でパン、2本指でピンチズーム
+      let touchStartX = null;
+      let touchStartDist = null;
+      let touchBaseRange = null;
+
+      canvas.addEventListener('touchstart', (e) => {
+        if (!chartFullPoints) return;
+        if (e.touches.length === 1) {
+          touchStartX = e.touches[0].clientX;
+          touchBaseRange = { ...chartRange };
+        } else if (e.touches.length === 2) {
+          touchStartDist = touchDistance(e.touches);
+          touchBaseRange = { ...chartRange };
+        }
+      }, { passive: true });
+
+      canvas.addEventListener('touchmove', (e) => {
+        if (!chartFullPoints) return;
+        const rect = canvas.getBoundingClientRect();
+        if (e.touches.length === 1 && touchStartX !== null) {
+          panChartByPixels(e.touches[0].clientX - touchStartX, rect.width, touchBaseRange);
+        } else if (e.touches.length === 2 && touchStartDist) {
+          const newDist = touchDistance(e.touches);
+          const factor = touchStartDist / Math.max(1, newDist);
+          const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
+          chartRange = { ...touchBaseRange };
+          zoomChart(factor, midX, rect.width);
+        }
+      }, { passive: true });
+
+      canvas.addEventListener('touchend', () => {
+        touchStartX = null;
+        touchStartDist = null;
+      });
+    }
+    attachChartInteractions();
+
+    document.getElementById('chartIntervals').addEventListener('click', (e) => {
+      const btn = e.target.closest('.chart-interval-btn');
+      if (!btn || !currentChartQuery) return;
+      loadChart(currentChartQuery, btn.dataset.interval);
+    });
+
+    document.getElementById('chartResetBtn').addEventListener('click', resetChartZoom);
+    document.getElementById('chartZoomInBtn').addEventListener('click', () => {
+      if (!chartFullPoints) return;
+      const rect = document.getElementById('chartCanvas').getBoundingClientRect();
+      zoomChart(0.7, rect.width / 2, rect.width);
+    });
+    document.getElementById('chartZoomOutBtn').addEventListener('click', () => {
+      if (!chartFullPoints) return;
+      const rect = document.getElementById('chartCanvas').getBoundingClientRect();
+      zoomChart(1 / 0.7, rect.width / 2, rect.width);
+    });
+
+    // 画面リサイズやレイアウト変更時の自動リサイズ
+    const chartWrap = document.querySelector('.chart-wrap');
+    if (chartWrap && window.ResizeObserver) {
+      new ResizeObserver(() => {
+        if (!chartFullPoints) return;
+        redrawChart();
+      }).observe(chartWrap);
+    } else {
+      window.addEventListener('resize', () => {
+        if (!chartFullPoints) return;
+        redrawChart();
+      });
+    }
+
+    /* =========================================================
+       マーケットパルス（検索していなくても常時流れるグローバルヘッドライン）
+       ========================================================= */
+    let pulseItems = [];
+
+    function renderPulse(newItems) {
+      if (!newItems || newItems.length === 0) return;
+
+      const seen = new Set(pulseItems.map(it => it.url).filter(Boolean));
+      for (const it of newItems) {
+        if (it.url && seen.has(it.url)) continue;
+        if (it.url) seen.add(it.url);
+        pulseItems.push(it);
+      }
+      // 常に「一番新しい記事」が先頭に来るよう公開日時で並び替え、件数の上限で肥大化を防ぐ
+      pulseItems.sort((a, b) => {
+        const ta = a.pub_date ? (new Date(a.pub_date).getTime() || 0) : 0;
+        const tb = b.pub_date ? (new Date(b.pub_date).getTime() || 0) : 0;
+        return tb - ta;
+      });
+      if (pulseItems.length > 40) pulseItems.length = 40;
+
+      const track = document.getElementById('pulseTrack');
+      const html = pulseItems.map(it => {
+        let t = '';
+        if (it.pub_date) {
+          try { t = new Date(it.pub_date).toLocaleTimeString('ja-JP', { hour12: false, hour: '2-digit', minute: '2-digit' }); }
+          catch (_) { t = ''; }
+        }
+        return `<span class="pulse-item"><span class="pm">${escapeHtml(t)} ${escapeHtml(it.meta || '')}</span><a href="${it.url || '#'}" target="_blank" rel="noopener">${escapeHtml(it.title || '')}</a></span>`;
+      }).join('');
+      // シームレスループのため内容を2回連結
+      track.innerHTML = html + html;
+    }
+
+    function connectMarketPulse() {
+      const es = new EventSource('/market-pulse-stream');
+      es.addEventListener('pulse', (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          if (data.status === 'ok' && Array.isArray(data.items)) renderPulse(data.items);
+        } catch (err) { console.error('pulse parse error', err); }
+      });
+      es.addEventListener('error', () => {
+        // EventSource はデフォルトで自動再接続されるため、ここではログのみ
+      });
+    }
+    connectMarketPulse();
+
+    /* =========================================================
+       銘柄比較（ウォッチリストから選択した銘柄を騰落率で重ね合わせ）
+       ========================================================= */
+    const COMPARE_COLORS = ['#ff9900', '#00c2ff', '#00e676', '#ff3b30', '#ffb84d', '#c792ff', '#eae6da', '#ffe066'];
+
+    function renderCompareChecklist() {
+      const container = document.getElementById('compareChecklist');
+      if (watchlist.size === 0) {
+        container.innerHTML = '<span class="m-empty" style="padding:8px 0;">ウォッチリストが空です。まず銘柄を追加してください。</span>';
+        return;
+      }
+      container.innerHTML = Array.from(watchlist.values()).map(entry => `
+    <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--text);cursor:pointer;">
+      <input type="checkbox" class="compare-check" value="${escapeHtml(entry.query)}">
+      ${escapeHtml(entry.code || entry.query)}
+    </label>
+  `).join('');
+    }
+
+    async function runCompare() {
+      const checked = Array.from(document.querySelectorAll('.compare-check:checked')).map(el => el.value);
+      const canvas = document.getElementById('compareCanvas');
+      const legendEl = document.getElementById('compareLegend');
+      const dctx = canvas.getContext('2d');
+      dctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      if (checked.length < 2) {
+        legendEl.innerHTML = '<span class="m-empty">比較するには2銘柄以上選択してください</span>';
+        return;
+      }
+
+      const interval = document.getElementById('compareInterval').value;
+      legendEl.innerHTML = '<span class="m-empty">読み込み中...</span>';
+
+      const results = await Promise.all(checked.map(async (q) => {
+        try {
+          const res = await fetch(`/api/history?q=${encodeURIComponent(q)}&interval=${encodeURIComponent(interval)}`);
+          const data = await res.json();
+          if (data.status !== 'ok' || !Array.isArray(data.points)) return null;
+          const points = data.points.filter(p => p.p != null);
+          if (points.length < 2) return null;
+          return { query: q, code: data.code || q, points };
+        } catch (err) {
+          console.error('compare fetch failed', q, err);
+          return null;
+        }
+      }));
+
+      const series = results.filter(Boolean);
+      if (series.length < 2) {
+        legendEl.innerHTML = '<span class="m-empty">十分なデータを取得できませんでした</span>';
+        return;
+      }
+
+      drawCompareChart(canvas, series);
+      legendEl.innerHTML = series.map((s, i) => `
+    <span class="cl-item"><span class="cl-swatch" style="background:${COMPARE_COLORS[i % COMPARE_COLORS.length]}"></span>${escapeHtml(s.code)}</span>
+  `).join('');
+    }
+
+    function drawCompareChart(canvas, series) {
+      const dctx = canvas.getContext('2d');
+      const w = canvas.width, h = canvas.height;
+      dctx.clearRect(0, 0, w, h);
+
+      const padding = { top: 14, bottom: 20, left: 6, right: 62 };
+      const plotW = w - padding.left - padding.right;
+      const plotH = h - padding.top - padding.bottom;
+
+      // 各系列を「期間開始時点を0%」とした騰落率に正規化する
+      const normalized = series.map(s => {
+        const base = s.points[0].p;
+        return s.points.map(p => ((p.p - base) / base) * 100);
+      });
+
+      const allVals = normalized.flat();
+      const maxV = Math.max(...allVals, 0);
+      const minV = Math.min(...allVals, 0);
+      const range = (maxV - minV) || 1;
+      const yFor = (v) => padding.top + (1 - (v - minV) / range) * plotH;
+
+      // グリッド + ゼロライン
+      dctx.strokeStyle = 'rgba(255,153,0,0.08)';
+      dctx.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const y = padding.top + (plotH / 4) * i;
+        dctx.beginPath(); dctx.moveTo(padding.left, y); dctx.lineTo(w - padding.right, y); dctx.stroke();
+      }
+      dctx.strokeStyle = 'rgba(234,230,218,0.35)';
+      dctx.beginPath();
+      const zeroY = yFor(0);
+      dctx.moveTo(padding.left, zeroY); dctx.lineTo(w - padding.right, zeroY); dctx.stroke();
+      dctx.fillStyle = 'rgba(234,230,218,0.5)';
+      dctx.font = '9px Consolas, monospace';
+      dctx.textAlign = 'left';
+      dctx.fillText('0%', w - padding.right + 6, zeroY + 3);
+
+      normalized.forEach((vals, si) => {
+        const color = COMPARE_COLORS[si % COMPARE_COLORS.length];
+        const n = vals.length;
+        dctx.beginPath();
+        vals.forEach((v, i) => {
+          const cx = padding.left + (plotW * i) / Math.max(1, n - 1);
+          const cy = yFor(v);
+          i === 0 ? dctx.moveTo(cx, cy) : dctx.lineTo(cx, cy);
+        });
+        dctx.strokeStyle = color;
+        dctx.lineWidth = 1.6;
+        dctx.stroke();
+
+        const lastV = vals[vals.length - 1];
+        dctx.fillStyle = color;
+        dctx.font = '10px Consolas, monospace';
+        dctx.textAlign = 'left';
+        dctx.fillText(`${lastV > 0 ? '+' : ''}${lastV.toFixed(1)}%`, w - padding.right + 6, yFor(lastV) + 3);
+      });
+    }
+
+    document.getElementById('compareRunBtn').addEventListener('click', runCompare);
+
+    /* =========================================================
+       決算カレンダー（ウォッチリスト・ポートフォリオ銘柄の次回決算予定）
+       ========================================================= */
+    async function loadCalendar() {
+      const tbody = document.getElementById('calTableBody');
+      const queries = new Set([...watchlist.keys(), ...portfolio.keys()]);
+
+      if (queries.size === 0) {
+        tbody.innerHTML = `<tr><td colspan="3" class="m-empty">ウォッチリストまたはポートフォリオに銘柄を追加してください</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = `<tr><td colspan="3" class="m-empty">読み込み中...</td></tr>`;
+
+      try {
+        const res = await fetch(`/api/earnings?symbols=${encodeURIComponent(Array.from(queries).join(','))}`);
+        const data = await res.json();
+        if (data.status !== 'ok' || !Array.isArray(data.items)) {
+          tbody.innerHTML = `<tr><td colspan="3" class="m-empty">取得に失敗しました</td></tr>`;
+          return;
+        }
+
+        const now = Date.now();
+        const rows = data.items.map(item => {
+          const upcoming = (item.earnings || [])
+            .map(e => ({ ...e, ts: new Date(e.date.replace(' ', 'T')).getTime() }))
+            .filter(e => !Number.isNaN(e.ts))
+            .sort((a, b) => a.ts - b.ts);
+          const next = upcoming.find(e => e.ts >= now) || upcoming[upcoming.length - 1] || null;
+          return { name: item.name, code: item.code, next };
+        });
+
+        rows.sort((a, b) => {
+          if (!a.next && !b.next) return 0;
+          if (!a.next) return 1;
+          if (!b.next) return -1;
+          return a.next.ts - b.next.ts;
+        });
+
+        if (rows.every(r => !r.next)) {
+          tbody.innerHTML = `<tr><td colspan="3" class="m-empty">決算予定日のデータが取得できませんでした（データ提供元の都合による銘柄もあります）</td></tr>`;
+          return;
+        }
+
+        tbody.innerHTML = rows.map(r => {
+          if (!r.next) {
+            return `<tr><td><span class="mname">${escapeHtml(r.name)}</span><span class="mcode">${escapeHtml(r.code)}</span></td><td>--</td><td>--</td></tr>`;
+          }
+          const days = Math.ceil((r.next.ts - now) / 86400000);
+          const daysLabel = days > 0 ? `あと${days}日` : (days === 0 ? '本日' : `${Math.abs(days)}日前`);
+          return `
+        <tr>
+          <td><span class="mname">${escapeHtml(r.name)}</span><span class="mcode">${escapeHtml(r.code)}</span></td>
+          <td>${escapeHtml(r.next.date)}</td>
+          <td>${daysLabel}</td>
+        </tr>`;
+        }).join('');
+      } catch (err) {
+        console.error('calendar fetch failed', err);
+        tbody.innerHTML = `<tr><td colspan="3" class="m-empty">取得エラー</td></tr>`;
+      }
+    }
+
+    /* =========================================================
+       起動時: localStorage に保存されたウォッチリスト・ポートフォリオ・
+       価格アラートを復元する
+       ========================================================= */
+    (function restorePersistedState() {
+      const savedWatchlist = loadFromStorage(STORAGE_KEYS.watchlist, []);
+      if (Array.isArray(savedWatchlist)) {
+        savedWatchlist.forEach(q => {
+          if (typeof q === 'string' && q.trim()) addToWatchlist(q, { silent: true, skipPersist: true });
+        });
+      }
+
+      const savedPortfolio = loadFromStorage(STORAGE_KEYS.portfolio, []);
+      if (Array.isArray(savedPortfolio)) {
+        savedPortfolio.forEach(h => {
+          if (h && h.query && h.qty > 0 && h.avgCost >= 0) {
+            addHolding(h.query, h.qty, h.avgCost, { skipPersist: true });
+          }
+        });
+      }
+
+      const savedAlerts = loadFromStorage(STORAGE_KEYS.alerts, []);
+      if (Array.isArray(savedAlerts)) {
+        savedAlerts.forEach(a => {
+          if (a && a.query && (a.condition === 'above' || a.condition === 'below') && typeof a.targetPrice === 'number') {
+            if (typeof a.id === 'number') alertIdSeq = Math.max(alertIdSeq, a.id + 1);
+            addAlert(a.query, a.condition, a.targetPrice, {
+              id: a.id, fired: a.fired, silent: true, skipPersist: true,
+            });
+          }
+        });
+      }
+    })();
+  </script>
+</body>
+
+</html>

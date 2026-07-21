@@ -2595,32 +2595,56 @@
        ========================================================= */
 
     /* ---- 銘柄ティックの共有購読マネージャー ----
-       ウォッチリスト・ポートフォリオ・価格アラートが同じ銘柄を見ることも多いため、
-       銘柄(query)ごとにEventSourceを1本だけ張り、複数の購読者(callback)へ配信する。
-       参照者が0になった時点で自動的に接続をクローズする。 */
-    const quoteSubscriptions = new Map(); // query -> { es, callbacks: Set<fn> }
+       ウォッチリスト・ポートフォリオ・価格アラートが同じ銘柄を見ることも多い。
+       以前は銘柄(query)ごとにEventSource（/search-stream）を1本ずつ張りっぱなしに
+       していたが、これだとウォッチリスト等に銘柄を数件登録しただけでブラウザの
+       同一オリジンへの同時接続数上限（HTTP/1.1では概ね6本）に達してしまい、
+       メインの検索パネル用に新しくSSE接続を張ろうとしても確立できなくなる不具合が
+       あった（決算情報が表示されない・チャートが読み込まれない、の直接原因）。
+       ウォッチリスト等が必要なのは値動きのティックだけなので、常時接続のSSEではなく
+       軽量な単発エンドポイント /api/quote への定期ポーリングに変更し、接続を専有し
+       ないようにする。 */
+    const QUOTE_POLL_INTERVAL_MS = 3000;
+    const quoteSubscriptions = new Map(); // query -> Set<callback>
+    let quotePollTimer = null;
 
-    function subscribeQuote(query, callback) {
-      let sub = quoteSubscriptions.get(query);
-      if (!sub) {
-        const es = new EventSource(`/search-stream?q=${encodeURIComponent(query)}`);
-        sub = { es, callbacks: new Set() };
-        es.addEventListener('stock', (e) => {
-          const data = JSON.parse(e.data);
+    function ensureQuotePolling() {
+      if (quotePollTimer) return;
+      quotePollTimer = setInterval(pollQuoteSubscriptions, QUOTE_POLL_INTERVAL_MS);
+    }
+
+    async function pollQuoteSubscriptions() {
+      const queries = Array.from(quoteSubscriptions.keys());
+      if (queries.length === 0) return;
+      await Promise.all(queries.map(async (query) => {
+        try {
+          const res = await fetch(`/api/quote?q=${encodeURIComponent(query)}`);
+          const data = await res.json();
           if (data.status !== 'ok') return;
-          sub.callbacks.forEach(cb => {
+          const callbacks = quoteSubscriptions.get(query);
+          if (!callbacks) return;
+          callbacks.forEach(cb => {
             try { cb(data); } catch (err) { console.error('quote callback error', err); }
           });
-        });
-        quoteSubscriptions.set(query, sub);
-      }
-      sub.callbacks.add(callback);
-      return function unsubscribe() {
-        sub.callbacks.delete(callback);
-        if (sub.callbacks.size === 0) {
-          sub.es.close();
-          quoteSubscriptions.delete(query);
+        } catch (err) {
+          console.error('quote poll failed', query, err);
         }
+      }));
+    }
+
+    function subscribeQuote(query, callback) {
+      let callbacks = quoteSubscriptions.get(query);
+      if (!callbacks) {
+        callbacks = new Set();
+        quoteSubscriptions.set(query, callbacks);
+      }
+      callbacks.add(callback);
+      ensureQuotePolling();
+      return function unsubscribe() {
+        const set = quoteSubscriptions.get(query);
+        if (!set) return;
+        set.delete(callback);
+        if (set.size === 0) quoteSubscriptions.delete(query);
       };
     }
 

@@ -606,6 +606,51 @@
       cursor: grabbing;
     }
 
+    .chart-hover-panel {
+      position: absolute;
+      background: rgba(255, 255, 255, 0.95);
+      border: 1px solid #ccc;
+      color: #111;
+      padding: 10px 14px;
+      border-radius: 4px;
+      font-family: sans-serif;
+      font-size: 12.5px;
+      font-weight: 500;
+      pointer-events: none;
+      display: none;
+      z-index: 50;
+      min-width: 170px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    }
+    .chart-hover-panel .title {
+      font-weight: bold;
+      margin-bottom: 8px;
+      font-size: 13px;
+      color: #000;
+    }
+    .chart-hover-panel .row {
+      display: flex;
+      align-items: center;
+      margin-bottom: 5px;
+    }
+    .chart-hover-panel .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      margin-right: 8px;
+      flex-shrink: 0;
+    }
+    .chart-hover-panel .label {
+      flex: 1;
+      color: #000;
+      font-weight: bold;
+    }
+    .chart-hover-panel .sep {
+      height: 1px;
+      background: #eee;
+      margin: 8px 0;
+    }
+
     #chartCanvas {
       width: 100%;
       height: 210px;
@@ -1783,9 +1828,9 @@
           <button class="chart-tool-btn" id="chartResetBtn" title="表示をリセット">⟲</button>
         </div>
         <div class="indicator-row" id="indicatorRow">
-          <button class="indicator-chip" data-ind="sma5">SMA5</button>
-          <button class="indicator-chip" data-ind="sma25">SMA25</button>
-          <button class="indicator-chip" data-ind="sma75">SMA75</button>
+          <button class="indicator-chip active" data-ind="sma5">SMA5</button>
+          <button class="indicator-chip active" data-ind="sma25">SMA25</button>
+          <button class="indicator-chip active" data-ind="sma75">SMA75</button>
           <button class="indicator-chip" data-ind="bb">BB(20,2σ)</button>
         </div>
         <span class="chart-status" id="chartStatus"></span>
@@ -1793,6 +1838,7 @@
       <div class="chart-canvas-wrap" id="chartCanvasWrap">
         <canvas id="chartCanvas" width="900" height="210"></canvas>
         <canvas id="volumeCanvas" width="900" height="70"></canvas>
+        <div id="chartHoverPanel" class="chart-hover-panel"></div>
       </div>
       <div class="chart-hint">ドラッグで左右移動 ／ マウスホイールまたは＋－でズーム ／ スマホは指でドラッグ・ピンチでズーム</div>
     </div>
@@ -3158,7 +3204,8 @@
     let chartFullPoints = null;   // 現在の足で取得した全期間データ
     let chartRange = null;        // {start, end} 表示中の範囲（chartFullPoints への実数インデックス）
     let chartIndicatorData = null; // 全期間に対して計算済みの指標（表示範囲でスライスして使う）
-    const chartIndicators = { sma5: false, sma25: false, sma75: false, bb: false };
+    const chartIndicators = { sma5: true, sma25: true, sma75: true, bb: false };
+    let chartCrosshair = null;    // クロスヘアの座標 {x, y}
 
     /* ---- テクニカル指標の計算 ---- */
     function computeSMA(values, period) {
@@ -3353,7 +3400,9 @@
 
       const range = (maxP - minP) || (maxP * 0.01) || 1;
 
-      const n = points.length;
+      const rangeIdx = getVisibleRangeIdx();
+      const sIdx = rangeIdx ? rangeIdx[0] : 0;
+      const n = (chartRange.end - chartRange.start) || 1;
       const slotW = plotW / n;
       const candleW = Math.max(1, Math.min(14, slotW * 0.62));
       const yFor = (price) => padding.top + (1 - (price - minP) / range) * plotH;
@@ -3371,7 +3420,13 @@
 
       // ローソク足
       points.forEach((p, i) => {
-        const cx = padding.left + slotW * i + slotW / 2;
+        const globalIdx = sIdx + i;
+        const visibleIdx = globalIdx - chartRange.start;
+        const cx = padding.left + slotW * visibleIdx + slotW / 2;
+        
+        // 画面外に飛び出しているものは描画をスキップ
+        if (cx < padding.left - slotW || cx > w - padding.right + slotW) return;
+
         const isUp = p.p >= p.o;
         const color = isUp ? '#00e676' : '#ff3b30';
         dctx.strokeStyle = color;
@@ -3398,7 +3453,10 @@
           let started = false;
           arr.forEach((v, i) => {
             if (v == null) return;
-            const cx = padding.left + slotW * i + slotW / 2;
+            const globalIdx = sIdx + i;
+            const visibleIdx = globalIdx - chartRange.start;
+            const cx = padding.left + slotW * visibleIdx + slotW / 2;
+            if (cx < padding.left || cx > w - padding.right) return; // 画面外はスキップ
             const cy = yFor(v);
             if (!started) { dctx.moveTo(cx, cy); started = true; }
             else dctx.lineTo(cx, cy);
@@ -3410,9 +3468,9 @@
           }
         };
 
-        if (chartIndicators.sma5) drawLine(indicators.sma5, '#00c2ff');
-        if (chartIndicators.sma25) drawLine(indicators.sma25, '#ffb84d');
-        if (chartIndicators.sma75) drawLine(indicators.sma75, '#eae6da');
+        if (chartIndicators.sma5) drawLine(indicators.sma5, '#e377c2');
+        if (chartIndicators.sma25) drawLine(indicators.sma25, '#2ca02c');
+        if (chartIndicators.sma75) drawLine(indicators.sma75, '#ff7f0e');
         if (chartIndicators.bb) {
           drawLine(indicators.bb.upper, 'rgba(199,146,255,0.8)', 1);
           drawLine(indicators.bb.lower, 'rgba(199,146,255,0.8)', 1);
@@ -3428,12 +3486,104 @@
         dctx.fillText(fmtPrice(price), w - padding.right + 6, y + 3);
       });
 
-      // 左端・右端の日時ラベル
-      dctx.fillStyle = 'rgba(234,230,218,0.5)';
-      dctx.textAlign = 'left';
-      dctx.fillText(points[0].t, padding.left, h - 4);
-      dctx.textAlign = 'right';
-      dctx.fillText(points[points.length - 1].t, w - padding.right, h - 4);
+      // 左端・右端の日時ラベル (クロスヘア非アクティブ時)
+      if (!chartCrosshair) {
+        dctx.fillStyle = 'rgba(234,230,218,0.5)';
+        dctx.textAlign = 'left';
+        dctx.fillText(points[0].t, padding.left, h - 4);
+        dctx.textAlign = 'right';
+        dctx.fillText(points[points.length - 1].t, w - padding.right, h - 4);
+      }
+
+      // クロスヘア描画と現在地情報の表示
+      if (chartCrosshair) {
+        const hoveredVisibleIdx = Math.floor((chartCrosshair.x - padding.left) / slotW);
+        const hoveredGlobalIdx = Math.round(chartRange.start + hoveredVisibleIdx);
+        
+        let hoverPoint = null;
+        let hoverCx = null;
+        if (hoveredGlobalIdx >= 0 && hoveredGlobalIdx < chartFullPoints.length) {
+            hoverPoint = chartFullPoints[hoveredGlobalIdx];
+            hoverCx = padding.left + slotW * (hoveredGlobalIdx - chartRange.start) + slotW / 2;
+        }
+
+        dctx.beginPath();
+        // 水平線
+        dctx.moveTo(padding.left, chartCrosshair.y);
+        dctx.lineTo(w - padding.right, chartCrosshair.y);
+        // 垂直線
+        if (hoverCx !== null && hoverCx >= padding.left && hoverCx <= w - padding.right) {
+          dctx.moveTo(hoverCx, padding.top);
+          dctx.lineTo(hoverCx, h - padding.bottom);
+        }
+        dctx.strokeStyle = 'rgba(255,255,255,0.3)';
+        dctx.lineWidth = 1;
+        dctx.setLineDash([4, 4]);
+        dctx.stroke();
+        dctx.setLineDash([]);
+
+        // Y軸（価格）ラベル
+        const priceAtCursor = minP + (1 - (chartCrosshair.y - padding.top) / plotH) * range;
+        dctx.fillStyle = '#00e5ff';
+        dctx.fillRect(w - padding.right, chartCrosshair.y - 9, 56, 18);
+        dctx.fillStyle = '#000';
+        dctx.fillText(fmtPrice(priceAtCursor), w - padding.right + 6, chartCrosshair.y + 4);
+
+        // X軸（日時）とOHLCラベル
+        const panel = document.getElementById('chartHoverPanel');
+        if (hoverPoint && hoverCx !== null && hoverCx >= padding.left && hoverCx <= w - padding.right) {
+          dctx.fillStyle = '#00e5ff';
+          const textW = dctx.measureText(hoverPoint.t).width;
+          dctx.fillRect(hoverCx - textW / 2 - 4, h - padding.bottom, textW + 8, 16);
+          dctx.fillStyle = '#000';
+          dctx.textAlign = 'center';
+          dctx.fillText(hoverPoint.t, hoverCx, h - padding.bottom + 11);
+          dctx.textAlign = 'left';
+
+          if (panel) {
+            let sma5 = '--', sma25 = '--', sma75 = '--';
+            if (chartIndicatorData) {
+              const v5 = chartIndicatorData.sma5[hoveredGlobalIdx];
+              const v25 = chartIndicatorData.sma25[hoveredGlobalIdx];
+              const v75 = chartIndicatorData.sma75[hoveredGlobalIdx];
+              if (v5 != null) sma5 = v5.toFixed(1);
+              if (v25 != null) sma25 = v25.toFixed(1);
+              if (v75 != null) sma75 = v75.toFixed(1);
+            }
+            const vol = hoverPoint.v ? hoverPoint.v.toLocaleString() + '株' : '--';
+            panel.innerHTML = `
+              <div class="title">${hoverPoint.t}</div>
+              <div class="row"><span class="dot" style="background:#1f77b4"></span><span class="label">始値 : ${hoverPoint.o.toLocaleString()}円</span></div>
+              <div class="row"><span class="dot" style="background:#1f77b4"></span><span class="label">高値 : ${hoverPoint.h.toLocaleString()}円</span></div>
+              <div class="row"><span class="dot" style="background:#1f77b4"></span><span class="label">安値 : ${hoverPoint.l.toLocaleString()}円</span></div>
+              <div class="row"><span class="dot" style="background:#1f77b4"></span><span class="label">終値 : ${hoverPoint.p.toLocaleString()}円</span></div>
+              <div class="row"><span class="dot" style="background:#e377c2"></span><span class="label">移動平均(5日) : ${sma5}</span></div>
+              <div class="row"><span class="dot" style="background:#2ca02c"></span><span class="label">移動平均(25日) : ${sma25}</span></div>
+              <div class="row"><span class="dot" style="background:#ff7f0e"></span><span class="label">移動平均(75日) : ${sma75}</span></div>
+              <div class="sep"></div>
+              <div class="row"><span class="dot" style="background:#8c564b"></span><span class="label">出来高 : ${vol}</span></div>
+            `;
+            panel.style.display = 'block';
+            
+            // パネルをマウス位置に追従させる
+            const panelW = panel.offsetWidth;
+            const panelH = panel.offsetHeight;
+            let px = chartCrosshair.x + 15;
+            let py = chartCrosshair.y + 15;
+            // 画面外にはみ出ないように調整
+            if (px + panelW > w) px = chartCrosshair.x - panelW - 10;
+            if (py + panelH > h) py = chartCrosshair.y - panelH - 10;
+            
+            panel.style.left = px + 'px';
+            panel.style.top = py + 'px';
+          }
+        } else {
+          if (panel) panel.style.display = 'none';
+        }
+      } else {
+        const panel = document.getElementById('chartHoverPanel');
+        if (panel) panel.style.display = 'none';
+      }
     }
 
     function drawVolumeChart(canvas, points) {
@@ -3445,7 +3595,9 @@
       const padding = VOLUME_PADDING;
       const plotW = w - padding.left - padding.right;
       const plotH = h - padding.top - padding.bottom;
-      const n = points.length;
+      const rangeIdx = getVisibleRangeIdx();
+      const sIdx = rangeIdx ? rangeIdx[0] : 0;
+      const n = (chartRange.end - chartRange.start) || 1;
       const slotW = plotW / n;
       const barW = Math.max(1, Math.min(14, slotW * 0.62));
 
@@ -3453,7 +3605,11 @@
       const maxV = Math.max(...vols, 1);
 
       points.forEach((p, i) => {
-        const cx = padding.left + slotW * i + slotW / 2;
+        const globalIdx = sIdx + i;
+        const visibleIdx = globalIdx - chartRange.start;
+        const cx = padding.left + slotW * visibleIdx + slotW / 2;
+        if (cx < padding.left - slotW || cx > w - padding.right + slotW) return;
+        
         const vh = Math.max(1, ((p.v || 0) / maxV) * plotH);
         const isUp = p.p >= p.o;
         dctx.fillStyle = isUp ? 'rgba(0,230,118,0.55)' : 'rgba(255,59,48,0.55)';
@@ -3498,12 +3654,13 @@
       const curLen = baseRange.end - baseRange.start;
       const idxDelta = -(dxPixels / plotW) * curLen; // 右へドラッグ = 過去方向へ移動
 
-      const maxLen = chartFullPoints.length - 1;
       let newStart = baseRange.start + idxDelta;
       let newEnd = baseRange.end + idxDelta;
-      if (newStart < 0) { newEnd -= newStart; newStart = 0; }
-      if (newEnd > maxLen) { newStart -= (newEnd - maxLen); newEnd = maxLen; }
-      newStart = Math.max(0, newStart);
+
+      // 無限スライドのために制限を緩和 (完全に画面外に飛ぶのだけ防ぐ)
+      const maxLen = chartFullPoints.length - 1;
+      if (newStart > maxLen) { newStart = maxLen; newEnd = newStart + curLen; }
+      if (newEnd < 0) { newEnd = 0; newStart = newEnd - curLen; }
 
       chartRange = { start: newStart, end: newEnd };
       redrawChart();
@@ -3546,14 +3703,28 @@
         canvas.style.cursor = 'grabbing';
       });
       window.addEventListener('mousemove', (e) => {
-        if (!isDragging) return;
         const rect = canvas.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+        if (mouseX >= 0 && mouseX <= rect.width && mouseY >= 0 && mouseY <= rect.height) {
+          chartCrosshair = { x: mouseX, y: mouseY };
+          if (!isDragging) redrawChart();
+        } else if (chartCrosshair !== null) {
+          chartCrosshair = null;
+          if (!isDragging) redrawChart();
+        }
+
+        if (!isDragging) return;
         panChartByPixels(e.clientX - dragStartX, rect.width, dragBaseRange);
       });
       window.addEventListener('mouseup', () => {
         if (!isDragging) return;
         isDragging = false;
         canvas.style.cursor = 'grab';
+      });
+      canvas.addEventListener('mouseleave', () => {
+        chartCrosshair = null;
+        redrawChart();
       });
 
       canvas.addEventListener('dblclick', () => resetChartZoom());

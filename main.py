@@ -1284,6 +1284,121 @@ def api_history():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+# ============================================================
+# 注文・約定分析（出来高ベースの簡易近似）
+#
+# 注意: 証券会社が提供する「超大口／大口／中口／小口」等の注文サイズ別の
+# 約定内訳は、個々の注文明細に基づく専有データであり、yfinance を含む
+# 公開データからは取得できない。そのため実際の注文サイズ別データは
+# 再現せず、代わりに「陽線=買い優勢の出来高、陰線=売り優勢の出来高」
+# とみなす簡易な tick-rule 方式で、値動きから買い/売り優勢を近似する。
+# あくまで参考値であり、実際の注文フローとは異なる点をUI側にも明記する。
+# ============================================================
+ORDER_FLOW_CACHE_TTL = 20  # 秒。頻繁な再計算を避けるための短期キャッシュ
+_order_flow_cache: Dict[str, tuple] = {}
+
+
+@app.route("/api/order-flow")
+def api_order_flow():
+    query = request.args.get("q", "").strip()
+    if not query:
+        return jsonify({"status": "error", "message": "query is empty"}), 400
+
+    try:
+        ticker_symbol = to_ticker_symbol(query)
+
+        now_ts = time.time()
+        cached = _order_flow_cache.get(ticker_symbol)
+        if cached and now_ts - cached[0] < ORDER_FLOW_CACHE_TTL:
+            return jsonify(cached[1])
+
+        ticker = shared_stock_provider.get_ticker(ticker_symbol)
+
+        hist = None
+        used_interval = None
+        for interval, period in (("1m", "1d"), ("5m", "5d"), ("1d", "1mo")):
+            try:
+                h = ticker.history(period=period, interval=interval)
+            except Exception:
+                h = None
+            if h is not None and not h.empty:
+                hist = h
+                used_interval = interval
+                break
+
+        if hist is None or hist.empty:
+            payload = {"status": "empty", "message": f"出来高データが見つかりませんでした: {query}"}
+            return jsonify(payload)
+
+        hist = hist[hist["Volume"].notna() & hist["Close"].notna() & hist["Open"].notna()]
+
+        buy_value = 0.0
+        sell_value = 0.0
+        buy_volume = 0
+        sell_volume = 0
+        prev_close = None
+        for _, row in hist.iterrows():
+            o, c, v = float(row["Open"]), float(row["Close"]), float(row["Volume"])
+            if v <= 0:
+                continue
+            value = c * v
+            if c > o:
+                is_buy = True
+            elif c < o:
+                is_buy = False
+            elif prev_close is not None:
+                is_buy = c >= prev_close
+            else:
+                is_buy = True
+            if is_buy:
+                buy_value += value
+                buy_volume += int(v)
+            else:
+                sell_value += value
+                sell_volume += int(v)
+            prev_close = c
+
+        total_value = buy_value + sell_value
+        if total_value <= 0:
+            payload = {"status": "empty", "message": f"出来高データが見つかりませんでした: {query}"}
+            return jsonify(payload)
+
+        buy_oku = buy_value / 1e8
+        sell_oku = sell_value / 1e8
+        net_oku = buy_oku - sell_oku
+        buy_pct = buy_value / total_value * 100
+        sell_pct = sell_value / total_value * 100
+
+        name = shared_stock_provider.info_cache.get(ticker_symbol)
+        if not name:
+            try:
+                name = ticker.info.get("shortName", query)
+                shared_stock_provider.info_cache[ticker_symbol] = name
+            except Exception:
+                name = query
+
+        payload = {
+            "status": "ok",
+            "code": ticker_symbol,
+            "name": name,
+            "interval": used_interval,
+            "is_approximation": True,
+            "dominance": "buy" if net_oku >= 0 else "sell",
+            "net_oku": round(net_oku, 2),
+            "buy_oku": round(buy_oku, 2),
+            "sell_oku": round(sell_oku, 2),
+            "buy_pct": round(buy_pct, 2),
+            "sell_pct": round(sell_pct, 2),
+            "buy_volume": buy_volume,
+            "sell_volume": sell_volume,
+        }
+        _order_flow_cache[ticker_symbol] = (now_ts, payload)
+        return jsonify(payload)
+    except Exception as e:
+        logger.warning("約定分析(出来高近似)の取得に失敗 query=%r: %s", query, e)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route("/api/calendar")
 def api_calendar():
     """

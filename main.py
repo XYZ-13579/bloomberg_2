@@ -174,6 +174,9 @@ class StockMaster:
             code_col = df.columns[1]
             name_col = df.columns[2]
             df["_norm_name"] = df[name_col].astype(str).apply(normalize)
+            # 長音符「ー」の有無による表記ゆれ（例: 正式名称「ＱＤレーザ」 vs 検索語「QDレーザー」）
+            # を吸収するための緩いマッチ用カラム。
+            df["_norm_name_loose"] = df["_norm_name"].str.replace("ー", "", regex=False)
             df["_norm_code"] = df[code_col].astype(str).apply(normalize)
             self._df = df
             self._mtime = os.path.getmtime(self.path)
@@ -209,7 +212,15 @@ class StockMaster:
         matches = df[
             df["_norm_name"].str.contains(q_norm, na=False, regex=False)
             | df["_norm_code"].str.contains(q_norm, na=False, regex=False)
-        ].head(limit)
+        ]
+        if matches.empty:
+            # 完全一致で見つからない場合、長音符「ー」の有無による表記ゆれを
+            # 吸収した緩いマッチにフォールバックする。
+            # 例: 「QDレーザー」で検索しても正式名称「ＱＤレーザ」にヒットさせる。
+            q_norm_loose = q_norm.replace("ー", "")
+            if q_norm_loose:
+                matches = df[df["_norm_name_loose"].str.contains(q_norm_loose, na=False, regex=False)]
+        matches = matches.head(limit)
         return [
             {"code": str(row[code_col]), "name": str(row[name_col])}
             for _, row in matches.iterrows()
@@ -1125,6 +1136,26 @@ def api_quote():
     return jsonify(data)
 
 
+def _format_earnings_dt(idx, fmt: str = "%Y-%m-%d %H:%M") -> str:
+    """
+    yfinance の get_earnings_dates() が返すタイムスタンプは米国東部時間
+    （America/New_York）で入っていることが多く、そのまま表示すると日本時間との
+    時差（標準時で14時間、夏時間で13時間）分ズレて見える。日本時間(JST)に変換
+    してからフォーマットする。tzinfoが無い場合は米国東部時間とみなして
+    localizeしてから変換する。
+    """
+    if not hasattr(idx, "strftime"):
+        return str(idx)
+    try:
+        ts = idx
+        if getattr(ts, "tzinfo", None) is None:
+            ts = ts.tz_localize("America/New_York")
+        ts_jst = ts.tz_convert(_JST)+timedelta(minutes=30)
+        return ts_jst.strftime(fmt)
+    except Exception:
+        return idx.strftime(fmt)
+
+
 def _safe_float(val) -> Optional[float]:
     try:
         f = float(val)
@@ -1179,7 +1210,7 @@ def api_earnings():
                 edf = ticker.get_earnings_dates(limit=6)
                 if edf is not None and not edf.empty:
                     for idx, row in edf.iterrows():
-                        date_str = idx.strftime("%Y-%m-%d %H:%M") if hasattr(idx, "strftime") else str(idx)
+                        date_str = _format_earnings_dt(idx, "%Y-%m-%d %H:%M")
                         earnings.append({
                             "date": date_str,
                             "eps_estimate": _safe_float(row.get("EPS Estimate")),
@@ -1196,36 +1227,42 @@ def api_earnings():
             logger.warning("決算情報の取得に失敗 query=%r: %s", q, e)
             return {"query": q, "code": q, "name": q, "earnings": [], "error": str(e)}
 
+    # 一次タイムアウト: キャッシュ済みの銘柄はほぼ即座に終わるが、新規追加銘柄など
+    # キャッシュが無いものは info / get_earnings_dates の実通信が発生し時間がかかる。
+    EARNINGS_FETCH_TIMEOUT = DEFAULT_TIMEOUT + 10
+    # 二次タイムアウト: 一次タイムアウト時点でまだ実行中のタスクに与える追加の猶予。
+    # with ブロックを抜ける際にはどのみち全タスクの完了を待つ（ThreadPoolExecutorの仕様）ため、
+    # ここで待つこと自体に追加コストは無く、結果を確実に拾い切ることが目的。
+    EARNINGS_FETCH_EXTRA_WAIT = 20
+
     with ThreadPoolExecutor(max_workers=max(4, len(queries))) as pool:
         futures = {pool.submit(_fetch_one, q): q for q in queries}
-        try:
-            for fut in as_completed(futures, timeout=DEFAULT_TIMEOUT + 10):
+        pending = set(futures.keys())
+
+        def _collect(iterable):
+            for fut in iterable:
+                pending.discard(fut)
                 try:
                     results.append(fut.result())
                 except Exception:
-                    logger.exception("決算情報タスクが失敗")
+                    logger.exception("決算情報タスクが失敗 query=%r", futures.get(fut))
+
+        try:
+            _collect(as_completed(futures, timeout=EARNINGS_FETCH_TIMEOUT))
         except FuturesTimeoutError:
-            # 新規追加された銘柄などキャッシュが無いものは info / get_earnings_dates の
-            # 実通信が発生し、他の（キャッシュ済みで即返る）銘柄より時間がかかることがある。
-            # ここで全体を失敗させると、既にキャッシュ済みの銘柄まで巻き込んで
-            # カレンダー全体が「取得に失敗しました」になってしまうため、
-            # タイムアウト時点までに完了しているものだけを拾って部分的な結果を返す。
-            done_queries = {r["query"] for r in results}
-            pending = []
-            for fut, q in futures.items():
-                if q in done_queries:
-                    continue
-                if fut.done():
-                    try:
-                        results.append(fut.result())
-                    except Exception:
-                        logger.exception("決算情報タスクが失敗 query=%r", q)
-                else:
-                    pending.append(q)
+            # ここで打ち切って全体を失敗にすると、既にキャッシュ済みの銘柄まで
+            # 巻き込んでカレンダー全体が失敗表示になってしまうため、未完了分にのみ
+            # 追加の猶予を与えて改めて回収を試みる（＝取りこぼしを防ぐ）。
+            if pending:
+                try:
+                    _collect(as_completed(list(pending), timeout=EARNINGS_FETCH_EXTRA_WAIT))
+                except FuturesTimeoutError:
+                    pass
             if pending:
                 logger.warning(
-                    "決算情報の取得がタイムアウトしました（未完了 %d件、遅延中の銘柄は次回リクエストでキャッシュ経由で返ります）: %r",
-                    len(pending), pending,
+                    "決算情報の取得が最終的にタイムアウトしました（未完了 %d件、"
+                    "次回リクエストではキャッシュ経由で返ります）: %r",
+                    len(pending), [futures[f] for f in pending],
                 )
 
     return jsonify({"status": "ok", "items": results})
@@ -1421,7 +1458,7 @@ def api_calendar():
                 now_ts = pd.Timestamp.now(tz=edf.index.tz) if edf.index.tz else pd.Timestamp.now()
                 future = edf[edf.index >= now_ts]
                 target_idx = future.index[0] if len(future) > 0 else edf.index[0]
-                earnings_date = target_idx.strftime("%Y-%m-%d")
+                earnings_date = _format_earnings_dt(target_idx, "%Y-%m-%d")
         except Exception:
             earnings_date = None
 

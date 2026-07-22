@@ -1363,6 +1363,64 @@
       letter-spacing: 0.5px;
     }
 
+    .ai-summary-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin-top: 4px;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      letter-spacing: 0.5px;
+      padding: 2px 8px;
+      background: transparent;
+      border: 1px solid rgba(255,153,0,0.3);
+      color: var(--text-dim);
+      cursor: pointer;
+      transition: all .15s;
+      border-radius: 2px;
+    }
+    .ai-summary-btn:hover {
+      border-color: var(--neon-blue);
+      color: var(--neon-blue);
+    }
+    .ai-summary-btn.loading {
+      opacity: .6;
+      pointer-events: none;
+    }
+    .ai-summary-panel {
+      display: none;
+      margin-top: 6px;
+      padding: 8px 10px;
+      background: rgba(0,200,200,0.06);
+      border-left: 2px solid var(--neon-cyan);
+      border-radius: 0 4px 4px 0;
+      font-size: 10px;
+      line-height: 1.7;
+      color: var(--text);
+      white-space: pre-wrap;
+    }
+    .ai-summary-panel.visible {
+      display: block;
+    }
+    .ai-sentiment-good {
+      color: var(--neon-green);
+      font-weight: bold;
+    }
+    .ai-sentiment-bad {
+      color: var(--neon-red);
+      font-weight: bold;
+    }
+    .ai-sentiment-neutral {
+      color: var(--text-dim);
+      font-weight: bold;
+    }
+    .ai-summary-panel .ai-header {
+      font-size: 9px;
+      letter-spacing: 1px;
+      color: var(--neon-cyan);
+      margin-bottom: 6px;
+    }
+
     .empty-state {
       grid-column: 1/-1;
       text-align: center;
@@ -1697,18 +1755,18 @@
     }
 
     .indicator-chip[data-ind="sma5"].active {
-      background: #00c2ff;
-      border-color: #00c2ff;
+      background: #e377c2;
+      border-color: #e377c2;
     }
 
     .indicator-chip[data-ind="sma25"].active {
-      background: #ffb84d;
-      border-color: #ffb84d;
+      background: #2ca02c;
+      border-color: #2ca02c;
     }
 
     .indicator-chip[data-ind="sma75"].active {
-      background: #eae6da;
-      border-color: #eae6da;
+      background: #ff7f0e;
+      border-color: #ff7f0e;
     }
 
     .indicator-chip[data-ind="bb"].active {
@@ -2295,6 +2353,7 @@
         const thumb = it.image
           ? `<img class="item-thumb" src="${it.image}" alt="" onerror="this.replaceWith(thumbFallback('${iconChar.replace(/'/g, "")}'))">`
           : `<div class="item-thumb-fallback">${escapeHtml(iconChar)}</div>`;
+        const aiId = `ai-${Math.random().toString(36).slice(2, 9)}`;
         return `
       <div class="item-row">
         <span class="item-index">${i + 1}</span>
@@ -2305,9 +2364,12 @@
             : `<span class="item-title">${escapeHtml(it.title || '(no title)')}</span>`}
           ${it.snippet ? `<div class="item-snippet">${escapeHtml(it.snippet)}</div>` : ''}
           ${it.meta ? `<div class="item-meta">${escapeHtml(it.meta)}</div>` : ''}
+          <button class="ai-summary-btn" data-ai-title="${escapeHtml(it.title || '')}" data-ai-snippet="${escapeHtml(it.snippet || '')}" data-ai-panel="${aiId}">🤖 AI要約</button>
+          <div class="ai-summary-panel" id="${aiId}"></div>
         </div>
       </div>`;
       }).join('');
+
 
       const bodyHtml = items.length
         ? `<div class="card-list">${rowsHtml}</div>`
@@ -2334,6 +2396,17 @@
         card.classList.toggle('collapsed');
       });
 
+      // AI要約ボタンのイベントを全アイテム分アタッチ
+      card.querySelectorAll('.ai-summary-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const panelId = btn.dataset.aiPanel;
+          const title = btn.dataset.aiTitle;
+          const snippet = btn.dataset.aiSnippet;
+          requestAiSummary(btn, panelId, title, snippet);
+        });
+      });
+
       return card;
     }
 
@@ -2342,6 +2415,61 @@
       div.className = 'item-thumb-fallback';
       div.textContent = icon;
       return div;
+    }
+
+    /* =========================================================
+       AI ニュース要約 / 材料判定 (ローカル llama-server)
+       ========================================================= */
+    async function requestAiSummary(btn, panelId, title, snippet) {
+      const panel = document.getElementById(panelId);
+      if (!panel) return;
+
+      // 既に要約済みで表示されている場合はトグル
+      if (panel.classList.contains('visible')) {
+        panel.classList.remove('visible');
+        btn.textContent = '🤖 AI要約';
+        return;
+      }
+
+      // ロード中表示
+      btn.classList.add('loading');
+      btn.textContent = '⏳ 分析中...';
+      panel.innerHTML = '';
+      panel.classList.remove('visible');
+
+      try {
+        const res = await fetch('/api/ai-summary', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title, body: snippet }),
+        });
+        const data = await res.json();
+
+        if (data.status === 'ok') {
+          const sentimentClass = data.sentiment === 'good' ? 'ai-sentiment-good'
+            : data.sentiment === 'bad' ? 'ai-sentiment-bad' : 'ai-sentiment-neutral';
+          const sentimentIcon = data.sentiment === 'good' ? '▲ 好材料'
+            : data.sentiment === 'bad' ? '▼ 悪材料' : '━ 中立';
+
+          panel.innerHTML = `
+            <div class="ai-header">🤖 AI ANALYSIS // LOCAL LLM</div>
+            <div class="${sentimentClass}" style="margin-bottom:6px;">${escapeHtml(sentimentIcon)}</div>
+            <div>${escapeHtml(data.summary)}</div>
+          `;
+          btn.textContent = '🤖 AI要約 ▾';
+        } else {
+          panel.innerHTML = `<div style="color:var(--neon-red);">${escapeHtml(data.message || 'エラーが発生しました')}</div>`;
+          btn.textContent = '🤖 AI要約';
+        }
+        panel.classList.add('visible');
+      } catch (err) {
+        panel.innerHTML = `<div style="color:var(--neon-red);">接続エラー: llama-server (port 8000) が起動していることを確認してください。</div>`;
+        panel.classList.add('visible');
+        btn.textContent = '🤖 AI要約';
+        console.error('AI summary error:', err);
+      } finally {
+        btn.classList.remove('loading');
+      }
     }
 
     /* =========================================================

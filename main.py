@@ -1406,6 +1406,93 @@ def search_stream():
     )
 
 
+# ============================================================
+# AI ニュース要約 / 材料判定 (ローカル llama-server, port 8000)
+# ============================================================
+LOCAL_LLM_URL = os.environ.get("LOCAL_LLM_URL", "http://localhost:8000/v1/chat/completions")
+LOCAL_LLM_MODEL = os.environ.get("LOCAL_LLM_MODEL", "local-model")
+LOCAL_LLM_TIMEOUT = float(os.environ.get("LOCAL_LLM_TIMEOUT", "60"))
+
+_AI_SYSTEM_PROMPT = (
+    "あなたは日本の株式市場に詳しい金融アナリストです。"
+    "与えられたニュース記事を読み、以下のフォーマットで日本語で回答してください。\n\n"
+    "【要約】\n（記事の要点を2〜3文で要約）\n\n"
+    "【材料判定】\n（「好材料」「悪材料」「中立」のいずれか1つだけを記載）\n\n"
+    "【判定理由】\n（判定した理由を1〜2文で説明）\n\n"
+    "不明な点があっても推測して回答してください。"
+)
+
+
+@app.route("/api/ai-summary", methods=["POST"])
+def api_ai_summary():
+    """
+    ローカル llama-server (OpenAI互換 /v1/chat/completions) を呼び出し、
+    ニュース記事の要約と好材料/悪材料の判定を返す。
+
+    Request JSON:
+        { "title": "記事タイトル", "body": "記事本文（省略可）" }
+
+    Response JSON:
+        {
+            "status": "ok",
+            "summary": "【要約】...\n【材料判定】...\n【判定理由】...",
+            "sentiment": "good" | "bad" | "neutral"
+        }
+    """
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        title = (body.get("title") or "").strip()
+        text = (body.get("body") or "").strip()
+
+        if not title:
+            return jsonify({"status": "error", "message": "title is required"}), 400
+
+        user_content = f"タイトル: {title}"
+        if text:
+            # 本文が長すぎると LLM のコンテキスト制限に引っかかるため 600 字に切る
+            user_content += f"\n\n本文:\n{text[:600]}"
+
+        payload = {
+            "model": LOCAL_LLM_MODEL,
+            "messages": [
+                {"role": "system", "content": _AI_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": 0.3,
+            "max_tokens": 400,
+        }
+
+        resp = requests.post(
+            LOCAL_LLM_URL,
+            json=payload,
+            timeout=LOCAL_LLM_TIMEOUT,
+            headers={"Content-Type": "application/json"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        answer = data["choices"][0]["message"]["content"].strip()
+
+        # 材料判定をキーワードで分類（フロントエンドで色分けに使う）
+        sentiment = "neutral"
+        if "好材料" in answer:
+            sentiment = "good"
+        elif "悪材料" in answer:
+            sentiment = "bad"
+
+        return jsonify({"status": "ok", "summary": answer, "sentiment": sentiment})
+
+    except requests.exceptions.ConnectionError:
+        logger.warning("AI summary: llama-server への接続に失敗しました (port 8000)")
+        return jsonify({"status": "error", "message": "AI サーバー (port 8000) に接続できません。llama-server が起動しているか確認してください。"}), 503
+    except requests.exceptions.Timeout:
+        logger.warning("AI summary: llama-server がタイムアウトしました")
+        return jsonify({"status": "error", "message": "AI サーバーの応答がタイムアウトしました。"}), 504
+    except Exception as e:
+        logger.exception("AI summary エラー")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5050"))
     debug = os.environ.get("FLASK_DEBUG", "1") == "1"

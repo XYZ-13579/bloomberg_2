@@ -1,0 +1,1 @@
+llama-server -m model/LFM2.5-1.2B-Instruct-Q8_0.gguf --port 8000

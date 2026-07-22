@@ -556,7 +556,6 @@ class YahooStockProvider(BaseScraper):
     color = "#ffcc00"
 
     def __init__(self):
-        self.ticker_cache: Dict[str, yf.Ticker] = {}
         self.info_cache: Dict[str, str] = {}
         # symbol -> (日付文字列, 前営業日終値)。fast_info.previous_close は銘柄によって
         # 直近値と食い違う既知の不具合があるため使わず、日足ヒストリーから算出したものを
@@ -564,9 +563,10 @@ class YahooStockProvider(BaseScraper):
         self._prev_close_cache: Dict[str, tuple] = {}
 
     def get_ticker(self, symbol: str) -> yf.Ticker:
-        if symbol not in self.ticker_cache:
-            self.ticker_cache[symbol] = yf.Ticker(symbol)
-        return self.ticker_cache[symbol]
+        # yfinanceのTickerインスタンスを長期間使い回すと、内部キャッシュ（fast_infoなど）により
+        # 前場終了時などに古い株価が残り続ける場合があるため、毎回インスタンスを生成する。
+        # 通信の安定化のため、リトライ設定済みのグローバルsessionを渡す。
+        return yf.Ticker(symbol, session=session)
 
     @staticmethod
     def _format_num(val) -> str:

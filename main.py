@@ -20,7 +20,7 @@ import threading
 import queue
 import os
 import unicodedata
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import quote_plus
@@ -1197,12 +1197,36 @@ def api_earnings():
             return {"query": q, "code": q, "name": q, "earnings": [], "error": str(e)}
 
     with ThreadPoolExecutor(max_workers=max(4, len(queries))) as pool:
-        futures = [pool.submit(_fetch_one, q) for q in queries]
-        for fut in as_completed(futures, timeout=DEFAULT_TIMEOUT + 10):
-            try:
-                results.append(fut.result())
-            except Exception:
-                logger.exception("決算情報タスクが失敗")
+        futures = {pool.submit(_fetch_one, q): q for q in queries}
+        try:
+            for fut in as_completed(futures, timeout=DEFAULT_TIMEOUT + 10):
+                try:
+                    results.append(fut.result())
+                except Exception:
+                    logger.exception("決算情報タスクが失敗")
+        except FuturesTimeoutError:
+            # 新規追加された銘柄などキャッシュが無いものは info / get_earnings_dates の
+            # 実通信が発生し、他の（キャッシュ済みで即返る）銘柄より時間がかかることがある。
+            # ここで全体を失敗させると、既にキャッシュ済みの銘柄まで巻き込んで
+            # カレンダー全体が「取得に失敗しました」になってしまうため、
+            # タイムアウト時点までに完了しているものだけを拾って部分的な結果を返す。
+            done_queries = {r["query"] for r in results}
+            pending = []
+            for fut, q in futures.items():
+                if q in done_queries:
+                    continue
+                if fut.done():
+                    try:
+                        results.append(fut.result())
+                    except Exception:
+                        logger.exception("決算情報タスクが失敗 query=%r", q)
+                else:
+                    pending.append(q)
+            if pending:
+                logger.warning(
+                    "決算情報の取得がタイムアウトしました（未完了 %d件、遅延中の銘柄は次回リクエストでキャッシュ経由で返ります）: %r",
+                    len(pending), pending,
+                )
 
     return jsonify({"status": "ok", "items": results})
 

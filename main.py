@@ -41,7 +41,7 @@ import pytz
 # ============================================================
 # CONFIG
 # ============================================================
-EXCEL_MASTER_PATH = os.environ.get("STOCK_MASTER_PATH", "data_j.xls")
+EXCEL_MASTER_PATH = os.environ.get("STOCK_MASTER_PATH", "data_j.xlsx")
 DEFAULT_TIMEOUT = float(os.environ.get("HTTP_TIMEOUT", "8"))
 STOCK_POLL_INTERVAL_SEC = float(os.environ.get("STOCK_POLL_INTERVAL_SEC", "1"))
 NEWS_POLL_INTERVAL_SEC = float(os.environ.get("NEWS_POLL_INTERVAL_SEC", "30"))
@@ -156,7 +156,7 @@ def normalize(s) -> str:
 
 
 class StockMaster:
-    """東証銘柄マスタ（data_j.xls 等）の遅延ロード + mtime に基づく自動再読込。"""
+    """東証銘柄マスタ（data_j.xlsx 等）の遅延ロード + mtime に基づく自動再読込。"""
 
     def __init__(self, path: str):
         self.path = path

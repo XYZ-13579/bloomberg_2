@@ -12,6 +12,7 @@ Bloomberg端末風のリアルタイム株価・ニュース監視サーバー�
   - 外部データ（Excelマスタ, yfinance）が取得できなくてもアプリ全体は落とさず、
     呼び出し元に分かりやすい status を返す
 """
+import hashlib
 import json
 import logging
 import re
@@ -23,10 +24,11 @@ import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, quote as url_quote
 from collections import defaultdict
 from typing import Dict, List, Optional, Set
 
+import numpy as np
 import yfinance as yf
 import requests
 from requests.adapters import HTTPAdapter
@@ -78,16 +80,14 @@ GLOBAL_CHANNEL = "__market_pulse__"
 MARKET_PULSE_QUERY = os.environ.get("MARKET_PULSE_QUERY", "日経平均")
 MARKET_PULSE_REFRESH_SEC = float(os.environ.get("MARKET_PULSE_REFRESH_SEC", "90"))
 
-# X (旧Twitter) 連携。
-# 2023年のAPI改定以降、X の投稿を正規に取得するには公式 API v2（有料プラン）の
-# Bearer Token が必須。無断スクレイピングはX社の利用規約に反するため実装しない。
-# 環境変数 TWITTER_BEARER_TOKEN が未設定の場合、この機能は自動的に無効化され、
-# フロントエンドにはその旨だけが通知される（アプリ全体には影響しない）。
-TWITTER_BEARER_TOKEN = os.environ.get("TWITTER_BEARER_TOKEN", "").strip()
-TWITTER_API_BASE = os.environ.get("TWITTER_API_BASE", "https://api.twitter.com/2")
-TWEET_POLL_INTERVAL_SEC = float(os.environ.get("TWEET_POLL_INTERVAL_SEC", "30"))
-TWEET_MAX_RESULTS = int(os.environ.get("TWEET_MAX_RESULTS", "20"))  # X API 仕様上 10〜100
-TWEET_LOOKBACK_HOURS = 24
+# Yahoo! リアルタイム検索設定
+YAHOO_REALTIME_POLL_INTERVAL_SEC = float(os.environ.get("YAHOO_REALTIME_POLL_INTERVAL_SEC", "5"))
+
+# 空売り情報（karauri.net）設定
+KARAURI_CACHE_TTL_SEC = int(os.environ.get("KARAURI_CACHE_TTL_SEC", "3600"))  # TTL内は通信せずキャッシュを返す
+# システムプロキシが原因で WinError 10061 等が出る環境向けに、既定ではプロキシを使わず直接接続する。
+# プロキシ経由で接続したい場合は KARAURI_BYPASS_PROXY=0 を指定する。
+KARAURI_BYPASS_PROXY = os.environ.get("KARAURI_BYPASS_PROXY", "1") == "1"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -473,89 +473,390 @@ class NewsAggregator(BaseScraper):
 
 
 # ============================================================
-# X (旧Twitter) 検索プロバイダ
+# Yahoo! リアルタイム検索スクレイパー
 # ============================================================
-class TwitterScraper(BaseScraper):
+class YahooRealtimeScraper(BaseScraper):
     """
-    X API v2 の「最近の検索」エンドポイントを使ってキーワード関連ポストを取得する。
-    公式APIのみを利用し、認証情報が無い場合は明示的に status="unavailable" を返す
-    （非公式スクレイピングは規約違反のため実装しない）。
+    Yahoo! リアルタイム検索（https://search.yahoo.co.jp/realtime/）から
+    キーワードに関する投稿を取得する。
+    公式APIではなくHTML/JSONスクレイピングのため、サイト仕様変更で動作しなくなる
+    可能性がある点に注意。
     """
 
-    site_name = "X (Twitter)"
-    icon = "𝕏"
-    color = "#1d9bf0"
-    SEARCH_ENDPOINT = f"{TWITTER_API_BASE}/tweets/search/recent"
+    site_name = "Yahoo! RT"
+    icon = "🔴"
+    color = "#ff0033"
+    BASE_URL = "https://search.yahoo.co.jp/realtime/search"
 
-    def __init__(self):
-        self._warned_no_token = False
+    _SCRAPE_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "ja,en;q=0.8",
+    }
 
-    def fetch(self, query: str) -> dict:
-        if not TWITTER_BEARER_TOKEN:
-            if not self._warned_no_token:
-                logger.warning(
-                    "TWITTER_BEARER_TOKEN が未設定のため X(旧Twitter)検索は無効化されています"
-                )
-                self._warned_no_token = True
-            return self.result(
-                status="unavailable",
-                summary="X検索は未設定です（環境変数 TWITTER_BEARER_TOKEN に公式APIのBearer Tokenを設定してください）",
-            )
+    def _extract_media(self, post: dict) -> tuple:
+        """
+        投稿に添付された画像・動画のURLを抽出する。
 
+        Yahoo!リアルタイム検索はX(Twitter)の旧APIに近いデータ構造
+        （entities/extended_entities配下にmedia配列を持つ形）を使っていることが多いため、
+        まずはその構造を優先的に探索する。見つからない場合は、投稿JSON全体を走査して
+        画像・動画URLらしき文字列（拡張子やCDNドメインで判定）を拾うフォールバックを行う。
+        アイコン・アバター画像は誤検出しないよう、キー名に "icon"/"avatar"/"profile"/"user"
+        を含むサブツリーは探索対象から除外する。
+        """
+        image_url = None
+        video_url = None
+
+        def _from_media_list(media_list):
+            nonlocal image_url, video_url
+            for m in media_list or []:
+                if not isinstance(m, dict):
+                    continue
+                mtype = m.get("type", "")
+                if mtype in ("video", "animated_gif"):
+                    variants = (m.get("video_info") or {}).get("variants") or []
+                    mp4s = [v for v in variants if v.get("content_type") == "video/mp4" and v.get("url")]
+                    if mp4s and not video_url:
+                        best = max(mp4s, key=lambda v: v.get("bitrate", 0))
+                        video_url = best["url"]
+                    elif variants and not video_url:
+                        for v in variants:
+                            if v.get("url"):
+                                video_url = v["url"]
+                                break
+                    if not image_url:
+                        image_url = m.get("media_url_https") or m.get("media_url")
+                elif mtype == "photo" or "media_url_https" in m or "media_url" in m:
+                    if not image_url:
+                        image_url = m.get("media_url_https") or m.get("media_url")
+
+        extended = post.get("extended_entities") or post.get("extendedEntities") or {}
+        _from_media_list(extended.get("media"))
+
+        if not image_url and not video_url:
+            entities = post.get("entities") or {}
+            _from_media_list(entities.get("media"))
+
+        if not image_url and not video_url:
+            for key in ("media", "photos", "images", "attachments"):
+                val = post.get(key)
+                if isinstance(val, list):
+                    _from_media_list(val)
+                    if image_url or video_url:
+                        break
+
+        if not image_url and not video_url:
+            def _walk(obj, depth=0):
+                nonlocal image_url, video_url
+                if depth > 6:
+                    return
+                if isinstance(obj, dict):
+                    for k, v in obj.items():
+                        if isinstance(k, str) and any(
+                            w in k.lower() for w in ("icon", "avatar", "profileimage", "user", "author")
+                        ):
+                            continue
+                        _walk(v, depth + 1)
+                elif isinstance(obj, list):
+                    for v in obj:
+                        _walk(v, depth + 1)
+                elif isinstance(obj, str) and obj.startswith("http"):
+                    low = obj.lower()
+                    if not video_url and (".m3u8" in low or low.endswith(".mp4")):
+                        video_url = obj
+                    elif not image_url and ("yimg.jp" in low or "pbs.twimg.com" in low) and "profile_images" not in low:
+                        image_url = obj
+
+            _walk(post)
+
+        return image_url, video_url
+
+    def fetch(self, keyword: str) -> dict:
+        """Yahoo! リアルタイム検索から投稿一覧と設定を取得する。"""
         try:
-            params = {
-                "query": f"{query} -is:retweet",
-                "max_results": max(10, min(100, TWEET_MAX_RESULTS)),
-                "tweet.fields": "created_at,public_metrics,author_id,lang",
-                "expansions": "author_id",
-                "user.fields": "username,name,profile_image_url,verified",
-            }
-            headers = {"Authorization": f"Bearer {TWITTER_BEARER_TOKEN}"}
-            r = session.get(self.SEARCH_ENDPOINT, headers=headers, params=params, timeout=DEFAULT_TIMEOUT)
+            url = f"{self.BASE_URL}?p={url_quote(keyword)}"
+            resp = requests.get(url, headers=self._SCRAPE_HEADERS, timeout=DEFAULT_TIMEOUT)
+            if resp.status_code != 200:
+                return self.error(f"Yahoo RT HTTP {resp.status_code}")
 
-            if r.status_code == 401:
-                return self.error("X APIの認証に失敗しました（TWITTER_BEARER_TOKENを確認してください）")
-            if r.status_code == 429:
-                return self.error("X APIのレート制限に達しました。次回のポーリングで再試行します")
-            if r.status_code != 200:
-                return self.error(f"X API HTTP {r.status_code}")
+            soup = BeautifulSoup(resp.text, "html.parser")
+            script_tag = soup.find("script", id="__NEXT_DATA__")
+            if not script_tag or not script_tag.string:
+                return self.error("Yahoo RT: __NEXT_DATA__ が見つかりません")
 
-            payload = r.json()
-            tweets = payload.get("data", [])
-            if not tweets:
-                return self.empty("該当するポストが見つかりませんでした")
+            data = json.loads(script_tag.string)
+            if not isinstance(data, dict):
+                logger.warning(
+                    "Yahoo RT: __NEXT_DATA__ 全体の型が想定と異なります keyword=%r type=%s", keyword, type(data)
+                )
+                return self.error("データ構造が想定と異なります（__NEXT_DATA__）")
 
-            users_by_id = {u["id"]: u for u in payload.get("includes", {}).get("users", [])}
+            page = data.get("props", {}).get("pageProps", {}).get("pageData")
+            if not isinstance(page, dict):
+                logger.warning(
+                    "Yahoo RT: pageData が見つかりません keyword=%r props keys=%s",
+                    keyword, list(data.get("props", {}).keys()),
+                )
+                return self.error("データ構造が想定と異なります（pageData）")
+
+            timeline = page.get("timeline")
+            if not isinstance(timeline, dict):
+                logger.warning(
+                    "Yahoo RT: pageData の構造が想定と異なります keyword=%r pageData keys=%s",
+                    keyword, list(page.keys()) if isinstance(page, dict) else type(page),
+                )
+                return self.error("データ構造が想定と異なります（timeline）")
+
+            posts = timeline.get("entry")
+            if posts is None:
+                # 該当ゼロ件のときは entry が存在しない/nullになるケースがあるため、
+                # これはエラーではなく「0件」として扱う。
+                posts = []
+            if not isinstance(posts, list):
+                logger.warning(
+                    "Yahoo RT: entry の型が想定と異なります keyword=%r type=%s value=%r",
+                    keyword, type(posts), str(posts)[:300],
+                )
+                return self.error("データ構造が想定と異なります（entry）")
+
+            settings = page.get("timelineSettings") or {}
 
             items = []
-            for t in tweets:
-                author = users_by_id.get(t.get("author_id"), {})
-                metrics = t.get("public_metrics", {}) or {}
-                username = author.get("username", "")
-                tweet_id = t.get("id", "")
-                url = f"https://x.com/{username}/status/{tweet_id}" if username else f"https://x.com/i/web/status/{tweet_id}"
-                engagement = (
-                    f"♥ {metrics.get('like_count', 0):,}  "
-                    f"⟲ {metrics.get('retweet_count', 0):,}  "
-                    f"💬 {metrics.get('reply_count', 0):,}"
-                )
+            for post in posts:
+                if not isinstance(post, dict):
+                    continue
+                post_id = post.get("id", "")
+                text = post.get("displayTextBody", "") or ""
+                screen_name = post.get("screenName", "") or ""
+                detail_url = post.get("detailUrl", "") or ""
+                if detail_url and not detail_url.startswith(("http://", "https://")):
+                    # Yahoo側のJSONは "/realtime/search/tweet/xxxx?..." のような
+                    # 相対パスで返ってくることがあるため、絶対URLに補完する。
+                    detail_url = "https://search.yahoo.co.jp" + (
+                        detail_url if detail_url.startswith("/") else f"/{detail_url}"
+                    )
+
+                def _safe_int(v) -> int:
+                    try:
+                        return int(v)
+                    except (TypeError, ValueError):
+                        return 0
+
+                likes = _safe_int(post.get("likesCount", 0))
+                rt_count = _safe_int(post.get("rtCount", 0))
+                created_at_raw = post.get("createdAt") or post.get("created_at")
+
+                # 投稿日時を datetime に変換。
+                # Yahoo側の実装変更により ISO8601文字列 / UNIXタイムスタンプ(秒 or ミリ秒)
+                # のどちらで返ってきても対応できるようにする。
+                pub_dt = None
+                if isinstance(created_at_raw, str) and created_at_raw:
+                    try:
+                        pub_dt = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
+                    except ValueError:
+                        pub_dt = None
+                elif isinstance(created_at_raw, (int, float)) and created_at_raw:
+                    try:
+                        ts = created_at_raw / 1000 if created_at_raw > 10**12 else created_at_raw
+                        pub_dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                    except (ValueError, OSError, OverflowError):
+                        pub_dt = None
+
+                engagement = f"♥ {likes:,}  ⟲ {rt_count:,}"
+                image_url, video_url = self._extract_media(post)
+                # Yahoo! RTの検索ワードハイライト用タグ(\tSTART\t / \tEND\t)をclean_textの空白除去で損なわないよう保護
+                text_marked = text.replace("\tSTART\t", "\x01").replace("\tEND\t", "\x02")
+                cleaned_title = clean_text(text_marked, 280).replace("\x01", "\tSTART\t").replace("\x02", "\tEND\t")
+
                 items.append({
-                    "title": clean_text(t.get("text", ""), 280),
-                    "url": url,
+                    "id": post_id,
+                    "title": cleaned_title,
+                    "url": detail_url,
                     "snippet": engagement,
-                    "meta": f"@{username}" if username else "X",
-                    "image": author.get("profile_image_url"),
-                    "pub_date": t.get("created_at", ""),
+                    "meta": f"@{screen_name}" if screen_name else "Yahoo RT",
+                    "image": image_url,
+                    "video": video_url,
+                    "pub_date": pub_dt.isoformat() if pub_dt else "",
+                    "_pub_dt": pub_dt,
+                    "_post_id": post_id,
                 })
 
-            items.sort(key=lambda x: x.get("pub_date") or "", reverse=True)
-            return self.result(items=items, pages_fetched=1, summary=f"{len(items)}件のポストを取得")
+            latest_id = settings.get("latestTweetId", "")
+            summary = f"{len(items)}件の投稿を取得（latestId: {latest_id}）"
+            return self.result(items=items, pages_fetched=1, summary=summary)
+
+        except (KeyError, json.JSONDecodeError) as e:
+            logger.warning("Yahoo RT: パース失敗 keyword=%r: %s", keyword, e)
+            return self.error(f"データ解析に失敗しました: {e}")
         except requests.RequestException as e:
-            logger.warning("X検索取得に失敗 query=%r: %s", query, e)
+            logger.warning("Yahoo RT: 取得失敗 keyword=%r: %s", keyword, e)
             return self.error(str(e))
-        except Exception:
-            logger.exception("X検索取得中に予期しないエラー query=%r", query)
-            return self.error("internal error")
+        except Exception as e:
+            # ここに来る場合は KeyError/JSONDecodeError/RequestException 以外の
+            # 想定外のエラー（Yahoo側のページ構造変更などが主な原因）。
+            # 原因を切り分けやすくするため、例外の型・メッセージをそのまま返す。
+            logger.exception("Yahoo RT: 予期しないエラー keyword=%r", keyword)
+            return self.error(f"internal error: {type(e).__name__}: {e}")
+
+
+# ============================================================
+# 空売り情報スクレイパー（karauri.net）
+# ============================================================
+class KarauriError(Exception):
+    """空売り情報の取得・解析に失敗したときの例外。status は API で返す HTTP ステータス。"""
+
+    def __init__(self, message: str, status: int = 502):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+
+
+class KarauriScraper:
+    """
+    karauri.net から銘柄ごとの空売り残高情報（大量保有している空売り者の一覧）を取得する。
+
+    負荷とレート制限への配慮として2段階のキャッシュを持つ:
+      1. TTL（既定1時間）以内は通信せずパース済みデータをそのまま返す
+      2. TTL経過後に再取得してもHTMLのハッシュが前回と同じならパースを省略する
+    ネットワークエラー時に古いキャッシュがあれば、それを stale=True 付きで返す。
+    Flask は threaded=True で動くため、辞書操作はロックで保護し、
+    同一銘柄の同時リクエストは1回の通信にまとめる。
+    """
+
+    URL_TEMPLATE = "https://karauri.net/{code}/"
+    SHORT_HEADERS = ["計算日", "空売り者", "残高割合", "増減率", "残高数量", "増減量", "備考"]
+
+    def __init__(self, cache_ttl_seconds: int = KARAURI_CACHE_TTL_SEC):
+        self.cache_ttl = cache_ttl_seconds
+        self._html_hashes: Dict[str, str] = {}
+        self._cache: Dict[str, dict] = {}
+        self._last_fetch_time: Dict[str, float] = {}
+        self._lock = threading.Lock()
+        self._code_locks: Dict[str, threading.Lock] = defaultdict(threading.Lock)
+
+        self._session = requests.Session()
+        self._session.trust_env = not KARAURI_BYPASS_PROXY
+        self._session.headers.update({"User-Agent": USER_AGENT, "Accept-Language": "ja,en;q=0.8"})
+        self._session.mount("https://", HTTPAdapter(max_retries=_retry_cfg))
+
+    def _cached(self, code: str, *, ignore_ttl: bool = False) -> Optional[dict]:
+        with self._lock:
+            data = self._cache.get(code)
+            fetched = self._last_fetch_time.get(code)
+        if data is None or fetched is None:
+            return None
+        if not ignore_ttl and time.time() - fetched >= self.cache_ttl:
+            return None
+        return data
+
+    def get_short_selling_data(self, code: str) -> dict:
+        """指定した銘柄コードの空売り情報を返す。失敗時は KarauriError を送出する。"""
+        fresh = self._cached(code)
+        if fresh is not None:
+            return dict(fresh, cached=True)
+
+        with self._code_locks[code]:
+            # 待っている間に他スレッドが取得を終えていれば、それを使う
+            fresh = self._cached(code)
+            if fresh is not None:
+                return dict(fresh, cached=True)
+
+            try:
+                resp = self._session.get(
+                    self.URL_TEMPLATE.format(code=code), timeout=DEFAULT_TIMEOUT
+                )
+                if resp.status_code == 404:
+                    raise KarauriError(f"karauri.net に銘柄コード {code} のページがありません", 404)
+                resp.raise_for_status()
+            except KarauriError:
+                raise
+            except requests.RequestException as e:
+                logger.info("karauri: 取得失敗 code=%s: %s", code, e)
+                stale = self._cached(code, ignore_ttl=True)
+                if stale is not None:
+                    return dict(stale, cached=True, stale=True)
+                raise KarauriError(f"karauri.net への接続に失敗しました: {e}", 502)
+
+            html = resp.text
+            current_hash = hashlib.md5(html.encode("utf-8")).hexdigest()
+
+            with self._lock:
+                unchanged = self._html_hashes.get(code) == current_hash and code in self._cache
+                if unchanged:
+                    # 更新なし: パースを省略し、TTL の起点だけ更新する
+                    self._last_fetch_time[code] = time.time()
+                    return dict(self._cache[code], cached=True)
+
+            result = self._parse(html, code)
+            with self._lock:
+                self._html_hashes[code] = current_hash
+                self._cache[code] = result
+                self._last_fetch_time[code] = time.time()
+            return dict(result, cached=False)
+
+    def _parse(self, html: str, code: str) -> dict:
+        soup = BeautifulSoup(html, "html.parser")
+        result = {
+            "銘柄コード": code,
+            "基本情報": {},
+            "空売り状況": [],
+            "source_url": self.URL_TEMPLATE.format(code=code),
+            "fetched_at": now_iso(),
+        }
+
+        tables = soup.find_all("table")
+
+        # 1. 基本情報（主市場, 業種, 証券コード/EDINET, 英名称）
+        if len(tables) > 0:
+            ths = [th.get_text(" ", strip=True) for th in tables[0].find_all("th")]
+            tds = [td.get_text(" ", strip=True) for td in tables[0].find_all("td")]
+            basic: Dict[str, str] = {}
+            for th, td in zip(ths, tds):
+                if "市場" in th:
+                    basic["主市場"] = td
+                elif "業種" in th:
+                    basic["業種"] = td
+                elif "証券コード" in th or "EDINET" in th:
+                    basic["証券コード/EDINET"] = td
+                elif "英名称" in th:
+                    basic["英名称"] = td
+                else:
+                    basic[th] = td
+            result["基本情報"] = basic
+
+        # 2. 空売り状況（計算日, 空売り者, 残高割合, 増減率, 残高数量, 増減量, 備考）
+        if len(tables) > 1:
+            short_table = tables[1]
+            headers_text = [th.get_text(" ", strip=True) for th in short_table.find_all("th")]
+            for row in short_table.find_all("tr"):
+                tds = row.find_all("td")
+                if not tds:
+                    continue
+                row_data = {
+                    headers_text[i]: td.get_text(" ", strip=True)
+                    for i, td in enumerate(tds)
+                    if i < len(headers_text)
+                }
+                result["空売り状況"].append(row_data)
+
+        return result
+
+
+shared_karauri_scraper = KarauriScraper()
+
+
+def resolve_karauri_code(query: str) -> Optional[str]:
+    """銘柄名・コード・'7203.T' 形式のいずれからでも東証4桁コードを求める。該当なしは None。"""
+    q = unicodedata.normalize("NFKC", query or "").strip()
+    if q.upper().endswith(".T"):
+        q = q[:-2]
+    code = stock_master.resolve_code(q).upper()
+    if re.fullmatch(r"[0-9A-Z]{4}", code):
+        return code
+    return None
 
 
 # ============================================================
@@ -757,7 +1058,7 @@ shared_stock_provider = YahooStockProvider()
 # イベントブローカー（SSE配信）
 # ============================================================
 _last_news_cache: Dict[str, dict] = {}
-_last_tweet_cache: Dict[str, dict] = {}
+_last_yahoo_realtime_cache: Dict[str, dict] = {}
 
 
 class EventManager:
@@ -840,7 +1141,8 @@ event_manager = EventManager()
 # ============================================================
 class MonitorRegistry:
     """
-    各クエリにつき「株価監視」「ニュース監視」「X(旧Twitter)監視」の3スレッドを起動する。
+    各クエリにつき「株価監視」「ニュース監視」「Yahoo!リアルタイム監視」の
+    3スレッドを起動する。
     誰も購読していない状態が IDLE_MONITOR_TTL_SEC を超えたスレッドは自ら終了し、
     その旨をレジストリへ報告する。全スレッドが終了して初めてクエリを「未起動」に戻す。
     """
@@ -863,7 +1165,8 @@ class MonitorRegistry:
                 target=self._run_news_monitor, args=(query,), daemon=True, name=f"news-monitor:{query}"
             ).start()
             threading.Thread(
-                target=self._run_tweet_monitor, args=(query,), daemon=True, name=f"tweet-monitor:{query}"
+                target=self._run_yahoo_realtime_monitor, args=(query,), daemon=True,
+                name=f"yahoo-rt-monitor:{query}"
             ).start()
             logger.info("監視スレッドを起動しました query=%r", query)
 
@@ -887,9 +1190,9 @@ class MonitorRegistry:
         finally:
             self._mark_stopped(query)
 
-    def _run_tweet_monitor(self, query: str) -> None:
+    def _run_yahoo_realtime_monitor(self, query: str) -> None:
         try:
-            tweet_monitor_loop(query)
+            yahoo_realtime_monitor_loop(query)
         finally:
             self._mark_stopped(query)
 
@@ -994,77 +1297,68 @@ def news_monitor_loop(query: str) -> None:
         time.sleep(NEWS_POLL_INTERVAL_SEC)
 
 
-def _parse_iso(dt_str: Optional[str]) -> Optional[datetime]:
-    if not dt_str:
-        return None
-    try:
-        return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-    except ValueError:
-        return None
 
+def yahoo_realtime_monitor_loop(query: str) -> None:
+    """
+    Yahoo! リアルタイム検索をポーリングし、キーワードに関する投稿を継続的に配信する。
 
-def tweet_monitor_loop(query: str) -> None:
+    5秒ごとにポーリングし、取得できたスナップショットを毎回配信する
+    （新着が無いポーリングでも、いいね数・リポスト数などの変動を反映するため
+    最新のスナップショットを送り続ける。「新着0件だから配信しない」とはしない）。
+    新着投稿があった場合のみ、ログにその件数を通知する。
     """
-    X API v2 の「最近の検索」をポーリングし、キーワードに関する新着ポストのみを
-    差分配信する（ニュース監視と同じ「既知URLは無視・カットオフより古い投稿は無視」方式）。
-    TWITTER_BEARER_TOKEN が未設定の場合は一度だけ unavailable を通知し、
-    無駄なポーリングをしないよう待機間隔を延ばす。
-    """
-    scraper = TwitterScraper()
-    seen_urls: Set[str] = set()
-    last_fetch_time: Optional[datetime] = None
-    unavailable_notified = False
+    scraper = YahooRealtimeScraper()
+    seen_ids: Set[str] = set()
 
     while True:
         if not _wait_while_idle(query):
-            logger.info("X監視をアイドルタイムアウトで終了 query=%r", query)
+            logger.info("Yahoo!RT監視をアイドルタイムアウトで終了 query=%r", query)
             return
 
         try:
             data = scraper.fetch(query)
 
-            if data.get("status") == "unavailable":
-                if not unavailable_notified:
-                    event_manager.broadcast(query, "tweet", data)
-                    unavailable_notified = True
-                time.sleep(max(TWEET_POLL_INTERVAL_SEC * 4, 60))
-                continue
-
             if data.get("status") == "ok":
-                now_utc = datetime.now(timezone.utc)
-                cutoff = last_fetch_time or (now_utc - timedelta(hours=TWEET_LOOKBACK_HOURS))
+                items = data.get("items", [])
+                new_count = 0
 
-                new_items = []
-                for item in data.get("items", []):
-                    url = item.get("url", "")
-                    pub_dt = _parse_iso(item.get("pub_date"))
+                for item in items:
+                    # 内部処理用の一時キーはフロントエンドに送らないので取り除く
+                    item.pop("_pub_dt", None)
+                    post_id = item.pop("_post_id", None) or item.get("id") or item.get("url", "")
 
-                    if not url or url in seen_urls:
-                        seen_urls.add(url)
-                        continue
-                    if pub_dt is not None and pub_dt <= cutoff:
-                        seen_urls.add(url)
-                        continue
+                    if post_id and post_id not in seen_ids:
+                        new_count += 1
+                    if post_id:
+                        seen_ids.add(post_id)
 
-                    seen_urls.add(url)
-                    new_items.append(item)
+                if len(seen_ids) > 2000:  # メモリ肥大化防止
+                    seen_ids.clear()
 
-                last_fetch_time = now_utc
+                # 新着の有無にかかわらず、毎ポーリングごとに最新スナップショットを配信する。
+                # これによりフロントエンドは常に最新のいいね数・投稿一覧に更新され続ける。
+                send_data = dict(data)
+                send_data["items"] = items
+                send_data["total_items"] = len(items)
+                send_data["new_count"] = new_count
+                send_data["summary"] = (
+                    f"{len(items)}件の投稿（うち新着{new_count}件・Yahoo! RT）"
+                )
+                _last_yahoo_realtime_cache[query] = send_data
+                event_manager.broadcast(query, "yahoo_realtime", send_data)
 
-                if new_items:
-                    send_data = dict(data)
-                    send_data["items"] = new_items
-                    send_data["total_items"] = len(new_items)
-                    send_data["summary"] = f"{len(new_items)}件の新着ポスト"
-                    _last_tweet_cache[query] = send_data
-                    event_manager.broadcast(query, "tweet", send_data)
-                    event_manager.broadcast(query, "log", {"message": f"Xで{len(new_items)}件の新着ポストを検知しました"})
+                if new_count > 0:
+                    event_manager.broadcast(query, "log", {
+                        "message": f"Yahoo!RTで{new_count}件の新着投稿を検知しました"
+                    })
             elif data.get("status") == "error":
-                event_manager.broadcast(query, "log", {"message": f"X検索エラー: {data.get('summary', '')}"})
+                event_manager.broadcast(query, "log", {
+                    "message": f"Yahoo!RT取得エラー: {data.get('summary', '')}"
+                })
         except Exception:
-            logger.exception("X監視ループでエラー query=%r", query)
+            logger.exception("Yahoo!RT監視ループでエラー query=%r", query)
 
-        time.sleep(TWEET_POLL_INTERVAL_SEC)
+        time.sleep(YAHOO_REALTIME_POLL_INTERVAL_SEC)
 
 
 def market_pulse_loop() -> None:
@@ -1322,6 +1616,642 @@ def api_history():
 
 
 # ============================================================
+# GRAND CROSS
+# ------------------------------------------------------------
+# v2: 単純な条件充足数の合算(0/1判定)だった従来のスコアリングに対し、
+#   1) ADXによる「トレンドの質」フィルタ（レンジ相場でのダマシを減点）
+#   2) 出来高条件の連続性チェック（単日スパイクではなく2〜3日の継続を評価）
+#   3) RSI弱気ダイバージェンス検知（高値更新中でも失速していれば警告）
+#   4) 週足トレンドとの整合性確認（日足だけのノイズを抑制）
+#   5) 直近スコア推移の返却（フロント側でモメンタムの向きを可視化）
+# を追加し、「本当に使える」シグナルに近づける。
+#
+# さらに、クロス"成立後"にしか反応できない上記指標を補うため、
+# calculate_grand_cross_precursor() で「クロスが成立する前」の予兆
+# （移動平均線の収束速度、MACDの収束、出来高の積み上がり、
+#   ボリンジャーバンドのスクイーズ、RSIの底上げ）を検知し、
+# 「あと何営業日程度でクロスしそうか」を推定する早期警戒システムを提供する。
+# ============================================================
+GRAND_CROSS_CACHE_TTL = 300
+_grand_cross_cache: Dict[str, tuple] = {}
+_grand_cross_precursor_cache: Dict[str, tuple] = {}
+
+
+def _linreg_slope(series: pd.Series, window: int = 5) -> Optional[float]:
+    """直近 window 本を単回帰し、1本あたりの平均変化量（傾き）を返す。
+    ノイズの多い日次差分よりも、複数日の趨勢を安定して捉えるために使う。
+    """
+    tail = series.dropna().tail(window)
+    if len(tail) < max(3, window - 1):
+        return None
+    y = tail.values
+    x = list(range(len(y)))
+    try:
+        slope = float(np.polyfit(x, y, 1)[0])
+    except Exception:
+        return None
+    if not np.isfinite(slope):
+        return None
+    return slope
+
+
+def _compute_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14):
+    """ADX（平均方向性指数）と +DI/-DI を計算する。
+    ADXは値の大小そのものではなく「トレンドの強さ・有無」を測る指標で、
+    レンジ相場（トレンドなし）で発生したゴールデンクロス等の"ダマシ"を
+    判別するために使う（プロのテクニカル分析でも定番のフィルタ）。
+    """
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+
+    tr1 = high - low
+    tr2 = (high - close.shift()).abs()
+    tr3 = (low - close.shift()).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+
+    safe_atr = atr.replace(0, np.nan)
+    plus_di = 100 * (plus_dm.ewm(alpha=1 / period, adjust=False, min_periods=period).mean() / safe_atr)
+    minus_di = 100 * (minus_dm.ewm(alpha=1 / period, adjust=False, min_periods=period).mean() / safe_atr)
+    di_sum = (plus_di + minus_di).replace(0, np.nan)
+    dx = 100 * (plus_di - minus_di).abs() / di_sum
+    adx = dx.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    return adx, plus_di, minus_di
+
+
+def _detect_rsi_divergence(close: pd.Series, rsi: pd.Series, lookback: int = 20) -> bool:
+    """弱気ダイバージェンス（価格は直近高値を更新しているのに RSI は
+    それに追随できていない状態）を簡易検出する。
+    スコア上は好条件が揃っていても、内実は勢いが失速している
+    "ダマシ"の兆候をユーザーに警告するための補助シグナル。
+    """
+    if len(close) < lookback + 2:
+        return False
+    window_close = close.iloc[-(lookback + 1):-1]
+    window_rsi = rsi.iloc[-(lookback + 1):-1]
+    if window_close.dropna().empty or window_rsi.dropna().empty:
+        return False
+    prior_high_idx = window_close.idxmax()
+    prior_high_val = window_close.loc[prior_high_idx]
+    prior_high_rsi = window_rsi.loc[prior_high_idx]
+
+    cur_close = close.iloc[-1]
+    cur_rsi = rsi.iloc[-1]
+    if pd.isna(prior_high_val) or pd.isna(prior_high_rsi) or pd.isna(cur_close) or pd.isna(cur_rsi):
+        return False
+
+    return bool(cur_close > prior_high_val and cur_rsi < prior_high_rsi)
+
+
+def _weekly_trend_aligned(hist: pd.DataFrame) -> Optional[bool]:
+    """週足に変換し、週足終値が週足10週MAより上にあるかで長期トレンドとの
+    整合性を確認する。日足だけで判定するとダマシが多いクロスに対する
+    追加の裏付けとして使う（十分なデータがない場合は None）。
+    """
+    try:
+        weekly = hist["Close"].resample("W").last().dropna()
+        if len(weekly) < 12:
+            return None
+        w_ma10 = weekly.rolling(window=10).mean()
+        if pd.isna(w_ma10.iloc[-1]):
+            return None
+        return bool(weekly.iloc[-1] > w_ma10.iloc[-1])
+    except Exception:
+        return None
+
+
+def calculate_grand_cross(hist: pd.DataFrame) -> dict:
+    if len(hist) < 75:
+        return {"status": "error", "message": "DATA INSUFFICIENT"}
+
+    try:
+        close = hist["Close"]
+        high = hist["High"]
+        low = hist["Low"]
+        volume = hist["Volume"]
+
+        # 1. TREND (25)
+        ma5 = close.rolling(window=5).mean()
+        ma25 = close.rolling(window=25).mean()
+        ma75 = close.rolling(window=75).mean()
+
+        # 2. MOMENTUM (20)
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema26 = close.ewm(span=26, adjust=False).mean()
+        macd = ema12 - ema26
+        signal = macd.ewm(span=9, adjust=False).mean()
+
+        # 3. RSI (15)
+        delta = close.diff()
+        up = delta.clip(lower=0)
+        down = -1 * delta.clip(upper=0)
+        ema_up = up.ewm(com=13, adjust=False).mean()
+        ema_down = down.ewm(com=13, adjust=False).mean()
+        rs = ema_up / ema_down
+        rsi = 100 - (100 / (1 + rs))
+
+        # 4. VOLUME (20)
+        vol20 = volume.rolling(window=20).mean()
+
+        # 5. トレンド品質フィルタ (ADX) ※新規
+        adx, plus_di, minus_di = _compute_adx(high, low, close)
+
+        def get_row_score(idx_offset):
+            if len(hist) < abs(idx_offset) + 20:
+                return 0, {}
+
+            c_v = close.iloc[idx_offset]
+            h_v = high.iloc[idx_offset]
+            l_v = low.iloc[idx_offset]
+            vol_v = volume.iloc[idx_offset]
+
+            ma5_v = ma5.iloc[idx_offset]
+            ma25_v = ma25.iloc[idx_offset]
+            ma75_v = ma75.iloc[idx_offset]
+
+            p5_idx = idx_offset - 5
+            p5_ma75 = ma75.iloc[p5_idx] if p5_idx >= -len(ma75) else ma75_v
+
+            macd_v = macd.iloc[idx_offset]
+            sig_v = signal.iloc[idx_offset]
+            rsi_v = rsi.iloc[idx_offset]
+            v20_v = vol20.iloc[idx_offset]
+
+            # 過去20日の高値 (前日まで)
+            h20_slice = high.iloc[idx_offset-20 : idx_offset] if idx_offset < -1 else high.iloc[-21:-1]
+            h20_v = h20_slice.max() if not h20_slice.empty else h_v
+
+            # 直近の重要高値 (過去5日)
+            h5_slice = high.iloc[idx_offset-5 : idx_offset] if idx_offset < -1 else high.iloc[-6:-1]
+            h5_v = h5_slice.max() if not h5_slice.empty else h_v
+
+            # 出来高の"継続性"（新規）: 直近3日のうち何日が20日平均を上回っているか。
+            # 単日の出来高スパイクだけでは仕手化・ノイズと区別できないため、
+            # 継続日数を見ることでより信頼度の高い"資金流入"を判定する。
+            vol3_start = idx_offset - 2
+            if vol3_start >= -len(volume):
+                vol3_slice = volume.iloc[vol3_start: idx_offset + 1 if idx_offset != -1 else None]
+            else:
+                vol3_slice = volume.iloc[-3:]
+            v20_3_slice = vol20.iloc[vol3_start: idx_offset + 1 if idx_offset != -1 else None] if vol3_start >= -len(vol20) else vol20.iloc[-3:]
+            persistent_days = 0
+            try:
+                persistent_days = int((vol3_slice.values > v20_3_slice.values).sum())
+            except Exception:
+                persistent_days = 0
+
+            score = 0
+            conds = {
+                "ma_trend": False, "golden_cross": False, "macd": False, "macd_zero": False,
+                "rsi": False, "volume": False, "breakout": False, "volume_persistent": False,
+            }
+
+            # TREND (25)
+            if pd.notna(ma5_v) and pd.notna(ma25_v) and ma5_v > ma25_v:
+                score += 10
+                conds["golden_cross"] = True
+            if pd.notna(ma25_v) and pd.notna(ma75_v) and ma25_v > ma75_v:
+                score += 10
+            if pd.notna(ma75_v) and pd.notna(p5_ma75) and ma75_v > p5_ma75:
+                score += 5
+                conds["ma_trend"] = True
+
+            # MOMENTUM (20)
+            if pd.notna(macd_v) and pd.notna(sig_v) and macd_v > sig_v:
+                score += 10
+                conds["macd"] = True
+            if pd.notna(macd_v) and macd_v > 0:
+                score += 10
+                conds["macd_zero"] = True
+
+            # RSI (15)
+            if pd.notna(rsi_v):
+                if rsi_v > 50:
+                    score += 10
+                    conds["rsi"] = True
+                if rsi_v < 70:
+                    score += 5
+
+            # VOLUME (20) ― 単日条件 + 継続性ボーナス
+            if pd.notna(vol_v) and pd.notna(v20_v) and v20_v > 0:
+                if vol_v > v20_v:
+                    score += 5
+                    conds["volume"] = True
+                if vol_v > v20_v * 1.5:
+                    score += 5
+                if persistent_days >= 2:
+                    score += 5
+                    conds["volume_persistent"] = True
+
+            # BREAKOUT (20)
+            if pd.notna(c_v) and pd.notna(h20_v) and c_v > h20_v:
+                score += 10
+                conds["breakout"] = True
+            if pd.notna(c_v) and pd.notna(h5_v) and c_v > h5_v:
+                score += 5
+
+            if pd.notna(h_v) and pd.notna(l_v) and pd.notna(c_v) and h_v > l_v:
+                if (c_v - l_v) / (h_v - l_v) >= 0.8:
+                    score += 5
+
+            return score, conds
+
+        raw_score, conds = get_row_score(-1)
+        prev_raw_score, _ = get_row_score(-2)
+
+        # --- トレンド品質フィルタ（ADX） ---
+        # ADX < 20: レンジ相場（トレンドなし）とみなし、シグナルの信頼度を下げる。
+        # ADX >= 25: 明確なトレンドがあり、クロス系シグナルの信頼度が高い。
+        adx_v = adx.iloc[-1] if pd.notna(adx.iloc[-1]) else None
+        if adx_v is None:
+            trend_quality = "UNKNOWN"
+            confidence = 0.85
+        elif adx_v >= 25:
+            trend_quality = "STRONG"
+            confidence = 1.0
+        elif adx_v >= 20:
+            trend_quality = "MODERATE"
+            confidence = 0.9
+        else:
+            trend_quality = "WEAK"
+            confidence = 0.65
+
+        # --- 弱気ダイバージェンス警告 ---
+        divergence = _detect_rsi_divergence(close, rsi)
+        conds["divergence_warning"] = divergence
+
+        # --- 週足トレンド整合性ボーナス ---
+        weekly_aligned = _weekly_trend_aligned(hist)
+        weekly_bonus = 5 if weekly_aligned else 0
+
+        adjusted = raw_score * confidence + weekly_bonus
+        if divergence:
+            adjusted -= 10  # 失速の兆候があれば減点（過信を防ぐ）
+        adjusted = max(0, min(100, round(adjusted)))
+
+        prev_adjusted = max(0, min(100, round(prev_raw_score * confidence)))
+
+        if adjusted >= 90:
+            sig_text = "GRAND CROSS"
+        elif adjusted >= 75:
+            sig_text = "STRONG BUY"
+        elif adjusted >= 60:
+            sig_text = "WATCH"
+        elif adjusted >= 40:
+            sig_text = "WAIT"
+        else:
+            sig_text = "WEAK"
+
+        is_new = (adjusted >= 90 and prev_adjusted < 90)
+
+        latest_date = hist.iloc[-1].name
+        if hasattr(latest_date, 'strftime'):
+            detected_at = latest_date.strftime("%Y-%m-%d")
+        else:
+            detected_at = str(latest_date)
+
+        # 安全な数値変換
+        def _f(val):
+            return float(val) if pd.notna(val) else None
+
+        vol_ratio = 0
+        if pd.notna(volume.iloc[-1]) and pd.notna(vol20.iloc[-1]) and vol20.iloc[-1] > 0:
+            vol_ratio = float(volume.iloc[-1] / vol20.iloc[-1])
+
+        # 直近10日分のスコア推移（フロントでモメンタムの向きを表示するため）
+        score_history = []
+        max_lookback = min(10, len(hist) - 20)
+        for i in range(max_lookback, 0, -1):
+            s, _c = get_row_score(-i)
+            score_history.append(round(s * confidence))
+        score_history.append(adjusted)
+
+        warnings = []
+        if divergence:
+            warnings.append("弱気ダイバージェンス: 価格は高値更新中だがRSIが追随せず失速の兆候")
+        if trend_quality == "WEAK":
+            warnings.append("ADX低水準: 明確なトレンドが確認できずレンジ相場の可能性（ダマシに注意）")
+
+        details = {
+            "ma5": _f(ma5.iloc[-1]),
+            "ma25": _f(ma25.iloc[-1]),
+            "ma75": _f(ma75.iloc[-1]),
+            "macd": _f(macd.iloc[-1]),
+            "signal": _f(signal.iloc[-1]),
+            "rsi": _f(rsi.iloc[-1]),
+            "adx": _f(adx_v) if adx_v is not None else None,
+            "volume_ratio": round(vol_ratio, 2),
+            "breakout": conds["breakout"],
+        }
+
+        return {
+            "status": "ok",
+            "score": adjusted,
+            "raw_score": raw_score,
+            "signal": sig_text,
+            "is_new": is_new,
+            "conditions": conds,
+            "details": details,
+            "detected_at": detected_at,
+            "trend_quality": trend_quality,
+            "confidence": round(confidence, 2),
+            "weekly_aligned": weekly_aligned,
+            "score_history": score_history,
+            "warnings": warnings,
+        }
+    except Exception as e:
+        logger.exception("GRAND CROSS計算エラー")
+        return {"status": "error", "message": str(e)}
+
+
+# ------------------------------------------------------------
+# GRAND CROSS 予兆検知（クロス成立"前"の早期警戒システム）
+# ------------------------------------------------------------
+# 上の calculate_grand_cross() はクロスが"成立した後"にしか反応できない
+# （ma5>ma25 等は結果でしかない）。実運用では「あと数日でクロスしそうだ」
+# という予兆を事前に掴みたいというニーズがあるため、
+#   ・移動平均線の乖離幅の収束速度から交差までの推定営業日数を算出
+#   ・MACDとシグナルの収束
+#   ・出来高の積み上がり（仕込みの兆候）
+#   ・RSIの底上げ（下から50へ向かうモメンタム）
+#   ・ボリンジャーバンドのスクイーズ（値動き収縮＝放れの前兆）
+# を統合した「予兆スコア」を新設する。
+PRECURSOR_CACHE_TTL = 300
+
+
+def calculate_grand_cross_precursor(hist: pd.DataFrame) -> dict:
+    if len(hist) < 80:
+        return {"status": "error", "message": "DATA INSUFFICIENT"}
+
+    try:
+        close = hist["Close"]
+        volume = hist["Volume"]
+
+        ma5 = close.rolling(window=5).mean()
+        ma25 = close.rolling(window=25).mean()
+        ma75 = close.rolling(window=75).mean()
+
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema26 = close.ewm(span=26, adjust=False).mean()
+        macd = ema12 - ema26
+        signal = macd.ewm(span=9, adjust=False).mean()
+
+        delta = close.diff()
+        up = delta.clip(lower=0)
+        down = -1 * delta.clip(upper=0)
+        ema_up = up.ewm(com=13, adjust=False).mean()
+        ema_down = down.ewm(com=13, adjust=False).mean()
+        rs = ema_up / ema_down
+        rsi = 100 - (100 / (1 + rs))
+
+        vol20 = volume.rolling(window=20).mean()
+        vol5 = volume.rolling(window=5).mean()
+
+        bb_mid = close.rolling(window=20).mean()
+        bb_std = close.rolling(window=20).std()
+        bb_width = ((bb_mid + 2 * bb_std) - (bb_mid - 2 * bb_std)) / bb_mid * 100
+
+        last_close = close.iloc[-1]
+        if pd.isna(last_close) or last_close == 0:
+            return {"status": "error", "message": "PRICE UNAVAILABLE"}
+
+        def _eta(gap_series: pd.Series, window: int = 5) -> Optional[int]:
+            """gap_series（短期MA - 長期MA 等）が 0（=クロス）へ到達するまでの
+            推定営業日数。gapが負（未達）かつ収束方向(velocity>0)の時のみ算出。
+            収束が止まっている/発散している場合は None（見込みなし）を返す。
+            """
+            gap_now = gap_series.dropna().iloc[-1] if not gap_series.dropna().empty else None
+            velocity = _linreg_slope(gap_series, window=window)
+            if gap_now is None or velocity is None:
+                return None
+            if gap_now >= 0:
+                return 0  # 既に交差済み
+            if velocity <= 0:
+                return None  # 収束していない（むしろ広がっている）
+            days = -gap_now / velocity
+            if days <= 0 or days > 60:
+                return None
+            return int(round(days))
+
+        # 1) 短期/中期MA (5/25) の収束状況 — 価格に対する%乖離で正規化
+        gap_5_25 = (ma5 - ma25) / close * 100
+        gap_5_25_now = gap_5_25.iloc[-1]
+        vel_5_25 = _linreg_slope(gap_5_25, window=5)
+        eta_5_25 = _eta(gap_5_25, window=5)
+
+        # 2) 中期/長期MA (25/75) の収束状況
+        gap_25_75 = (ma25 - ma75) / close * 100
+        gap_25_75_now = gap_25_75.iloc[-1]
+        vel_25_75 = _linreg_slope(gap_25_75, window=5)
+        eta_25_75 = _eta(gap_25_75, window=5)
+
+        # 3) MACD と シグナルの収束
+        gap_macd = macd - signal
+        gap_macd_now = gap_macd.iloc[-1]
+        vel_macd = _linreg_slope(gap_macd, window=5)
+        eta_macd = _eta(gap_macd, window=5)
+
+        # 4) 出来高の積み上がり（直近5日平均が20日平均に対して上昇傾向か）
+        vol_ratio_series = (vol5 / vol20.replace(0, np.nan))
+        vol_ratio_now = vol_ratio_series.iloc[-1]
+        vol_ratio_slope = _linreg_slope(vol_ratio_series, window=5)
+        volume_buildup = bool(
+            pd.notna(vol_ratio_now) and vol_ratio_now > 1.0
+            and vol_ratio_slope is not None and vol_ratio_slope > 0
+        )
+
+        # 5) RSIの底上げ（50未満から上昇トレンド）
+        rsi_now = rsi.iloc[-1]
+        rsi_slope = _linreg_slope(rsi, window=3)
+        rsi_building = bool(
+            pd.notna(rsi_now) and rsi_now < 50
+            and rsi_slope is not None and rsi_slope > 0
+        )
+
+        # 6) ボリンジャーバンドのスクイーズ（過去60日のバンド幅の下位20%以内）
+        bb_hist = bb_width.dropna().tail(60)
+        bb_squeeze = False
+        bb_percentile = None
+        if len(bb_hist) >= 20 and pd.notna(bb_width.iloc[-1]):
+            bb_percentile = float((bb_hist < bb_width.iloc[-1]).mean() * 100)
+            bb_squeeze = bb_percentile <= 20
+
+        def _convergence_score(gap_now, velocity, max_pts, tolerance_pct=3.0):
+            """gapがゼロに近く、かつプラス方向（収束）の速度が大きいほど高得点。
+            すでに交差済み(gap_now>=0)の場合は対象外として0点。
+            """
+            if gap_now is None or pd.isna(gap_now) or gap_now >= 0:
+                return 0.0
+            closeness = max(0.0, 1 - min(abs(gap_now), tolerance_pct) / tolerance_pct)
+            momentum = 0.0
+            if velocity is not None and velocity > 0:
+                momentum = min(1.0, velocity / (tolerance_pct / 5))
+            return max_pts * (0.5 * closeness + 0.5 * momentum)
+
+        score_5_25 = _convergence_score(gap_5_25_now, vel_5_25, 30)
+        score_25_75 = _convergence_score(gap_25_75_now, vel_25_75, 20)
+        score_macd = _convergence_score(gap_macd_now, vel_macd, 20, tolerance_pct=max(abs(gap_macd_now) if pd.notna(gap_macd_now) else 1, 1))
+        score_volume = 15.0 if volume_buildup else (7.0 if pd.notna(vol_ratio_now) and vol_ratio_now > 1.0 else 0.0)
+        score_rsi = 10.0 if rsi_building else 0.0
+        score_bb = 5.0 if bb_squeeze else 0.0
+
+        precursor_score = round(score_5_25 + score_25_75 + score_macd + score_volume + score_rsi + score_bb)
+        precursor_score = max(0, min(100, precursor_score))
+
+        if precursor_score >= 70:
+            classification = "IMMINENT"
+            label = "🔺 交差直前"
+        elif precursor_score >= 45:
+            classification = "APPROACHING"
+            label = "🔸 接近中"
+        elif precursor_score >= 20:
+            classification = "WATCHING"
+            label = "・兆候あり"
+        else:
+            classification = "NONE"
+            label = "--"
+
+        already_crossed = bool(pd.notna(gap_5_25_now) and gap_5_25_now >= 0)
+
+        narrative_parts = []
+        if already_crossed:
+            narrative_parts.append("短期線(5)は既に中期線(25)を上抜けています。")
+        elif eta_5_25 is not None:
+            narrative_parts.append(f"短期線(5)が中期線(25)に接近中。このペースだと約{eta_5_25}営業日でゴールデンクロスの可能性。")
+        elif pd.notna(gap_5_25_now) and gap_5_25_now < 0:
+            narrative_parts.append("短期線(5)は中期線(25)の下にあり、収束の兆候はまだ見られません。")
+
+        if eta_25_75 is not None:
+            narrative_parts.append(f"中期線(25)と長期線(75)も約{eta_25_75}営業日で交差する可能性があります。")
+
+        if volume_buildup:
+            narrative_parts.append("出来高が平均を上回るペースで積み上がっており、資金流入の兆候があります。")
+
+        if bb_squeeze:
+            narrative_parts.append("ボリンジャーバンドが収縮しており、大きな値動き（放れ）が近い可能性があります。")
+
+        if not narrative_parts:
+            narrative_parts.append("現時点で明確な予兆は検出されていません。")
+
+        return {
+            "status": "ok",
+            "precursor_score": precursor_score,
+            "classification": classification,
+            "label": label,
+            "already_crossed": already_crossed,
+            "eta_business_days": {
+                "ma5_25": eta_5_25,
+                "ma25_75": eta_25_75,
+                "macd_signal": eta_macd,
+            },
+            "components": {
+                "ma5_25": {"gap_pct": _round_or_none(gap_5_25_now), "velocity": _round_or_none(vel_5_25), "score": round(score_5_25, 1)},
+                "ma25_75": {"gap_pct": _round_or_none(gap_25_75_now), "velocity": _round_or_none(vel_25_75), "score": round(score_25_75, 1)},
+                "macd_signal": {"gap": _round_or_none(gap_macd_now), "velocity": _round_or_none(vel_macd), "score": round(score_macd, 1)},
+                "volume_buildup": {"active": volume_buildup, "ratio": _round_or_none(vol_ratio_now), "score": score_volume},
+                "rsi_building": {"active": rsi_building, "rsi": _round_or_none(rsi_now), "score": score_rsi},
+                "bb_squeeze": {"active": bb_squeeze, "percentile": _round_or_none(bb_percentile), "score": score_bb},
+            },
+            "narrative": " ".join(narrative_parts),
+        }
+    except Exception as e:
+        logger.exception("GRAND CROSS予兆計算エラー")
+        return {"status": "error", "message": str(e)}
+
+
+def _round_or_none(val, digits: int = 3):
+    if val is None or (isinstance(val, float) and (pd.isna(val) or not np.isfinite(val))):
+        return None
+    return round(float(val), digits)
+
+
+def _fetch_gc_history(query: str):
+    """グランドクロス系エンドポイントで共通利用する日足履歴取得処理。"""
+    ticker_symbol = to_ticker_symbol(query)
+    ticker = shared_stock_provider.get_ticker(ticker_symbol)
+    # 少なくとも150日分（約半年）取得してMA75やMACDを安定させる
+    hist = ticker.history(period="1y", interval="1d")
+    return ticker_symbol, hist
+
+
+@app.route("/api/grand-cross")
+def api_grand_cross():
+    query = request.args.get("q", "").strip()
+    if not query:
+        return jsonify({"status": "error", "message": "query is empty"}), 400
+
+    try:
+        now_ts = time.time()
+        # キャッシュキーは正規化前のクエリではなく銘柄コードにしたいが、
+        # コード解決自体にコストがあるため、まず簡易キャッシュを試みる。
+        cached_by_query = _grand_cross_cache.get(query)
+        if cached_by_query and now_ts - cached_by_query[0] < GRAND_CROSS_CACHE_TTL:
+            return jsonify(cached_by_query[1])
+
+        ticker_symbol, hist = _fetch_gc_history(query)
+
+        cached = _grand_cross_cache.get(ticker_symbol)
+        if cached and now_ts - cached[0] < GRAND_CROSS_CACHE_TTL:
+            _grand_cross_cache[query] = cached
+            return jsonify(cached[1])
+
+        if hist.empty:
+            payload = {"status": "error", "message": f"データが見つかりませんでした: {query}"}
+            return jsonify(payload)
+
+        result = calculate_grand_cross(hist)
+        if result.get("status") == "ok":
+            result["symbol"] = ticker_symbol
+
+        _grand_cross_cache[ticker_symbol] = (now_ts, result)
+        _grand_cross_cache[query] = (now_ts, result)
+        return jsonify(result)
+    except Exception as e:
+        logger.warning("GRAND CROSS取得失敗 query=%r: %s", query, e)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/api/grand-cross-precursor")
+def api_grand_cross_precursor():
+    """グランドクロス"成立前"の予兆（早期警戒）を返すエンドポイント。"""
+    query = request.args.get("q", "").strip()
+    if not query:
+        return jsonify({"status": "error", "message": "query is empty"}), 400
+
+    try:
+        now_ts = time.time()
+        cached_by_query = _grand_cross_precursor_cache.get(query)
+        if cached_by_query and now_ts - cached_by_query[0] < PRECURSOR_CACHE_TTL:
+            return jsonify(cached_by_query[1])
+
+        ticker_symbol, hist = _fetch_gc_history(query)
+
+        cached = _grand_cross_precursor_cache.get(ticker_symbol)
+        if cached and now_ts - cached[0] < PRECURSOR_CACHE_TTL:
+            _grand_cross_precursor_cache[query] = cached
+            return jsonify(cached[1])
+
+        if hist.empty:
+            payload = {"status": "error", "message": f"データが見つかりませんでした: {query}"}
+            return jsonify(payload)
+
+        result = calculate_grand_cross_precursor(hist)
+        if result.get("status") == "ok":
+            result["symbol"] = ticker_symbol
+
+        _grand_cross_precursor_cache[ticker_symbol] = (now_ts, result)
+        _grand_cross_precursor_cache[query] = (now_ts, result)
+        return jsonify(result)
+    except Exception as e:
+        logger.warning("GRAND CROSS予兆取得失敗 query=%r: %s", query, e)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+
+
+# ============================================================
 # 注文・約定分析（出来高ベースの簡易近似）
 #
 # 注意: 証券会社が提供する「超大口／大口／中口／小口」等の注文サイズ別の
@@ -1496,6 +2426,30 @@ def api_calendar():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.route("/api/karauri")
+def api_karauri():
+    """
+    空売り情報（karauri.net）を返す。code には銘柄コード・銘柄名のどちらも指定できる。
+    失敗時は {"error": "..."} を返す（フロント側の loadKarauri がこの形式を参照する）。
+    """
+    raw = (request.args.get("code") or request.args.get("q") or "").strip()
+    if not raw:
+        return jsonify({"error": "code is empty"}), 400
+
+    code = resolve_karauri_code(raw)
+    if not code:
+        return jsonify({"error": f"空売り情報は東証の銘柄コード（4桁）のみ対象です: {raw}"}), 404
+
+    try:
+        data = shared_karauri_scraper.get_short_selling_data(code)
+        return jsonify(data)
+    except KarauriError as e:
+        return jsonify({"error": e.message, "code": code}), e.status
+    except Exception as e:
+        logger.exception("空売り情報の取得で予期しないエラー query=%r", raw)
+        return jsonify({"error": f"internal error: {type(e).__name__}: {e}"}), 500
+
+
 @app.route("/market-pulse-stream")
 def market_pulse_stream():
     """検索クエリに依存しない、常時稼働の市場ヘッドラインSSE。"""
@@ -1558,9 +2512,9 @@ def search_stream():
             cached = _last_news_cache[query]
             yield f"event: result\ndata: {json.dumps(cached, ensure_ascii=False)}\n\n"
 
-        if query in _last_tweet_cache:
-            cached_tweet = _last_tweet_cache[query]
-            yield f"event: tweet\ndata: {json.dumps(cached_tweet, ensure_ascii=False)}\n\n"
+        if query in _last_yahoo_realtime_cache:
+            cached_yahoo = _last_yahoo_realtime_cache[query]
+            yield f"event: yahoo_realtime\ndata: {json.dumps(cached_yahoo, ensure_ascii=False)}\n\n"
 
         try:
             while True:
@@ -1595,7 +2549,7 @@ _AI_SYSTEM_PROMPT = (
     "【要約】\n（記事の要点を2〜3文で要約）\n\n"
     "【材料判定】\n（「好材料」「悪材料」「中立」のいずれか1つだけを記載）\n\n"
     "【判定理由】\n（判定した理由を1〜2文で説明）\n\n"
-    "不明な点があっても推測して回答してください。"
+    "暴落の可能性を感じたら、悪材料。上昇の可能性を感じたら好材料。変化がないと思えば中立。"
 )
 
 
